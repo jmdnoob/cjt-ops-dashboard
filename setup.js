@@ -134,17 +134,22 @@
     aaaPayDate: ["2ERL2vncdpLAjD027qXz"],
     aaaPaidTowMiles: ["B3fIEak2zCjLV5Gjcy6U"],
     // No fallback ID for this one, deliberately (2026-09-17). GHL doesn't
-    // allow changing an existing field's type, so this field has already
-    // been deleted and recreated twice in one day chasing the right type:
-    // Monetary (original) -> GHL confirmed live it silently stores
-    // negative values as positive -> Single Line/text (fixed the sign,
-    // but text can't be summed by GHL's own report-widget math) ->
-    // Number (current: signed AND summable). Each recreation got a brand
-    // new ID, so pasting any one of them in here would only go stale
-    // again next time. It relies entirely on the by-name lookup above. If
-    // "Test connection" ever shows this one as "not found," it means the
-    // field's name changed or the token lacks the Custom Fields scope —
-    // not that this fallback needs updating.
+    // allow changing an existing field's type, so this field has now been
+    // deleted and recreated three times in one day chasing the right type:
+    // Monetary (original) -> GHL confirmed live it silently stores negative
+    // values as positive -> Single Line/text (fixed the sign, but text
+    // can't be summed by GHL's own report-widget math) -> Number (signed
+    // AND summable, but any record reconciled before this field existed
+    // kept its old corrupted sign-dropped value — GHL keys a record's
+    // stored value to the field's *key*, which doesn't change on
+    // recreation, so switching type never clears or fixes old values) ->
+    // back to Single Line/text (current — summing in the dashboard was
+    // judged less important than a guaranteed-correct sign). Each
+    // recreation got a brand new ID, so pasting any one of them in here
+    // would only go stale again next time. It relies entirely on the
+    // by-name lookup above. If "Test connection" ever shows this one as
+    // "not found," it means the field's name changed or the token lacks
+    // the Custom Fields scope — not that this fallback needs updating.
     aaaPaymentDifference: [],
   };
 
@@ -498,14 +503,17 @@
     if (item.grossAmount !== null && fieldId("aaaGrossPaid")) customFields.push({ id: fieldId("aaaGrossPaid"), fieldValue: String(item.grossAmount) });
     if (item.payDate && fieldId("aaaPayDate")) customFields.push({ id: fieldId("aaaPayDate"), fieldValue: item.payDate });
     if (item.towMileage && fieldId("aaaPaidTowMiles")) customFields.push({ id: fieldId("aaaPaidTowMiles"), fieldValue: item.towMileage });
-    // AAA Payment Difference is a Number-type field (2026-09-17, after the
-    // Single Line/text version this same day couldn't be summed in
-    // dashboard report widgets) — sent as a plain rounded JS number, the
-    // same way the already-working Number field above (AAA Paid Tow Miles)
-    // is, NOT a formatted string like the Monetary fields further up.
-    // Math.round(...*100)/100 avoids floating-point noise from the
-    // grossAmount - expected subtraction (e.g. 19.999999999998).
-    if (item.diff !== null && fieldId("aaaPaymentDifference")) customFields.push({ id: fieldId("aaaPaymentDifference"), fieldValue: Math.round(item.diff * 100) / 100 });
+    // AAA Payment Difference is a Single Line/text field (2026-09-17,
+    // reverted back from a brief stint as Number-type — Number could be
+    // summed by dashboard report widgets, but the priority is seeing and
+    // exporting a correct positive/negative value, so it's text again).
+    // Sent as a formatted string, like the Monetary fields above, so the
+    // negative sign is preserved exactly (a genuinely Number/MONETARY-typed
+    // GHL field silently drops negative signs on write — confirmed live).
+    // toFixed(2) avoids floating-point noise from the grossAmount - expected
+    // subtraction (e.g. 19.999999999998) and keeps the export looking like
+    // a normal dollar amount (e.g. "-19.00").
+    if (item.diff !== null && fieldId("aaaPaymentDifference")) customFields.push({ id: fieldId("aaaPaymentDifference"), fieldValue: item.diff.toFixed(2) });
     if (customFields.length === 0) return Promise.resolve({ skipped: true });
     return ghlApi("/opportunities/" + item.opp.id, {
       method: "PUT",
