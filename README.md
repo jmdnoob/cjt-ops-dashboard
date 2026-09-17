@@ -89,6 +89,30 @@ tab- or comma-separated pasted text. True PDF parsing (reading the file
 directly) isn't built yet; it needs a real sample PDF statement to get the
 layout right rather than guessing one.
 
+**Works on any sub-account cloned from your snapshot, with zero per-client
+config.** The AAA fields on the Opportunity (Work Order Number, Expected Tow
+Amount, AAA Payment ID, etc.) are looked up **by name** through GHL's own
+`GET /locations/{locationId}/customFields` endpoint at the start of every
+preview/import run — not hardcoded IDs. This matters because GHL regenerates
+a new internal ID for every custom field when a snapshot is cloned into a new
+sub-account, even though the field *name* stays identical — so a hardcoded ID
+only ever works for the one location it was copied from. Name-based lookup
+works for any client whose sub-account came from the same snapshot, since the
+snapshot guarantees the names match even though the IDs don't. Hitting "Test
+connection" on the Setup page shows a field-mapping table so you can confirm,
+per client, that all 7 AAA fields resolved by name before running a real
+import — if one shows "using fallback ID" or "not found," that field's name
+in this location doesn't match what's expected (check spelling/capitalization
+in GHL), and import results for that field won't be reliable until it's
+fixed. See `FIELD_NAME_CANDIDATES` in `setup.js` to add a name variant.
+
+Pipeline names and custom-object schema keys (`driver_profiles`, `trucks`,
+etc.) don't have this problem — GHL preserves those exactly through a
+snapshot clone, so `dashboard.js`'s other sections (Drivers, Trucks,
+Maintenance, Training) already work unchanged on a new client's sub-account,
+same snapshot, no config beyond the token/Location ID and confirming the
+pipeline name in Setup.
+
 On Apply, each row writes to **two places**:
 1. The matched Opportunity's own AAA custom fields (AAA Payment ID, AAA Gross
    Paid Amount, AAA Pay Date, AAA Paid Tow Miles, AAA Payment Difference) —
@@ -100,6 +124,60 @@ On Apply, each row writes to **two places**:
    this is what `dashboard.js`'s "AAA Payments" section actually reads, and it
    captures unmatched/exception rows too, which the Opportunity-only approach
    can't (there's no Opportunity to write to for an unmatched Work Order).
+
+## The AAA Work Order Extractor extension (bundled, downloaded from here)
+
+The dispatcher-side companion tool — a Chrome extension plus a small local
+"bridge" program — lives in a separate project (`AAA-GHL-Extractor-Mac`),
+not in this repo's `dashboard.js`/`setup.js`. It reads an open AAA work
+order page and can preview/sync it straight into the Dispatch pipeline this
+dashboard also reads from. It never stores a GHL token itself — all GHL
+calls go through the local bridge, which reads its own `.env`/config on
+that computer.
+
+**Setup page section 6 ("AAA Work Order Extractor") is a download button,
+not an installer.** A webpage cannot install or run software on a
+visitor's computer by itself, full stop — clicking the button only
+downloads a zip from this repo's GitHub Releases. The actual install
+(unzip, then run the `.command` installer inside) still happens once,
+locally, on each computer that needs the extension — the same as
+installing any other desktop app.
+
+**Distributing an update:** build/zip the extension project as usual, then
+on GitHub: Releases → Draft a new release → attach the zip **named exactly**
+`AAA-GHL-Extractor-Mac.zip` (the filename `extensionMacAsset` in
+`setup.js`'s `DEFAULTS` expects) → publish. The Setup page's download
+button always points at
+`github.com/{extensionRepo}/releases/latest/download/{asset}`, GitHub's own
+"always resolves to the newest published Release" URL — so publishing a new
+Release with the same asset filename is the only step needed to ship an
+update; the button and every client's pasted snippet never change.
+`extensionRepo` defaults to this repo (`jmdnoob/cjt-ops-dashboard`) but can
+be overridden per deployment via `CJT_CONFIG.extensionRepo` (e.g. a
+reseller's own fork). A Windows build is not built yet — the button shows
+"coming soon" and stays disabled until `CJT_CONFIG.extensionWindowsAsset`
+is set to a real asset filename, at which point it activates automatically
+with no other code change needed.
+
+**The extension's own field-ID bug (fixed 2026-09-17).** The native bridge
+(`native-host/src/main.go`) had the exact same class of bug `setup.js` had:
+~10 GHL custom-field IDs (Work Order Number, Tow Miles, Base/Mileage Rate,
+Expected Tow Amount, Dispatch Source, Flatbed Required, Destination Name,
+etc.) were hardcoded to CJ Taylor Towing's own location. Fixed the same
+way: at the start of every preview/create/commit, the bridge now calls GHL's
+own `GET /locations/{locationId}/customFields`, matches each field it needs
+**by name**, and only falls back to the hardcoded CJ-Taylor-Towing ID when
+no name match is found (cached 10 minutes per location so a long-lived
+bridge process isn't re-fetching on every message). `--self-check` /
+`CHECK-SETUP.command` now also prints how many fields resolved by name vs.
+fell back, same diagnostic value as this page's own field-mapping table
+above. Covered by new Go tests (`TestDynamicFieldResolutionAcrossSubAccounts`,
+`TestDynamicFieldResolutionFallsBackWhenNameMissing`,
+`TestFieldIDResolutionIsCached`) simulating a second sub-account with
+regenerated field IDs but identical names — same scenario a real client's
+snapshot clone produces. All pre-existing tests still pass unchanged. The
+Mac binaries in `native-host/bin/` have been rebuilt with this fix; nothing
+else about installing/registering the extension changed.
 
 ## Security model
 
@@ -138,11 +216,14 @@ not against live traffic. Before relying on this in front of a client:
       in GHL before trusting this at scale.
   - [ ] Once confirmed, capture a real created-record response and update
         this checklist.
-- [ ] Re-derive the AAA/Work-Order custom field IDs (`WO_FIELD_IDS`,
-      `EXPECTED_TOW_AMOUNT_FIELD`, `AAA_PAYMENT_ID_FIELD`, etc. in
-      `setup.js`) for any client other than CJ Taylor Towing — these are
-      copied from CJ Taylor Towing's real, already-live Extractor tool and
-      are specific to their GHL location's custom field setup.
+- [ ] Confirm the AAA/Work-Order field **names** `FIELD_NAME_CANDIDATES` in
+      `setup.js` searches for actually match what's in GHL on a real
+      location — these are inferred from labels the existing Python
+      Extractor tool prints for the same fields, not independently
+      re-confirmed against a live `customFields` dump. Run "Test connection"
+      on Setup and check the field-mapping table; it should show all 7 as
+      "found by name" (`FIELD_ID_FALLBACKS` only covers CJ Taylor Towing's
+      own IDs as a safety net, not a real fix for a different client).
 - [ ] Confirm custom-object property keys (`objectKeys` in both files) for a
       different client's GHL objects, if their schema differs from CJ Taylor
       Towing's (`driver_profiles`, `trucks`, `maintenance_records`,
@@ -161,9 +242,22 @@ not against live traffic. Before relying on this in front of a client:
 
 ## Not yet built
 
+- A Windows build of the AAA Work Order Extractor extension/bridge — the
+  Setup page's download button already has a slot for it
+  (`extensionWindowsAsset`) and shows "coming soon" until one exists.
+  Porting the Go native host itself is close to free (already
+  cross-compiles with `GOOS=windows`); the real work is the
+  Windows-Registry-based native-messaging-host registration and rewriting
+  the `.command` installer scripts as their Windows/PowerShell equivalents.
 - Chrome extension self-hosted auto-update (`update_url` manifest mechanism)
-  for the separate `AAA-GHL-Extractor` browser-extension product.
+  for the separate `AAA-GHL-Extractor` browser-extension product — today,
+  shipping a new version means publishing a new GitHub Release (see
+  "Distributing the extension" above); Chrome itself still needs the
+  extension reloaded/reinstalled to pick up a packed-extension code change,
+  which the download button doesn't automate.
 - True PDF parsing for AAA statements (currently: paste-the-table fallback).
-- A GitHub repo doesn't exist yet outside this local scratch copy — create
-  one and push these files (plus set up the `@latest` jsDelivr tag) before
-  pointing any client's pasted `<script src>` at it.
+- An actual live-GHL paste-and-render check of `dashboard.js`/`setup.js` on
+  a **second**, real GHL sub-account cloned from the snapshot — the
+  by-name field resolution in both this repo and the extension's native
+  host has only been verified against realistic fixture data that
+  *simulates* a second sub-account's regenerated field IDs, not a real one.

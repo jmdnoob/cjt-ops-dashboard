@@ -27,6 +27,11 @@
  *   </script>
  *   <script src="https://cdn.jsdelivr.net/gh/YOUR_GH_ORG/cjt-ops-dashboard@latest/setup.js"></script>
  *
+ * Optional: extensionRepo/extensionMacAsset/extensionWindowsAsset in
+ * CJT_CONFIG control the "6. AAA Work Order Extractor" download button
+ * (section 6 below) — defaults to this same GitHub repo's Releases if
+ * omitted, so most clients never need to set these.
+ *
  * After changing anything here, use "Generate dashboard snippet" at the
  * bottom of the Connection section and paste the updated block onto BOTH
  * the dashboard page and this Setup page — there is no shared backend, the
@@ -68,6 +73,15 @@
     setupUrl: "",
     passcodeHash: "",
     idleLockMinutes: 10,
+    // Where the AAA Work Order Extractor browser-extension installer zips
+    // are published as GitHub Releases assets — same repo this file is
+    // hosted in by default, but overridable per deployment (e.g. a
+    // reseller's own fork/org). See "6. Extension download" below and
+    // README.md "Distributing the extension" for the release/asset naming
+    // convention this points at.
+    extensionRepo: "jmdnoob/cjt-ops-dashboard",
+    extensionMacAsset: "AAA-GHL-Extractor-Mac.zip",
+    extensionWindowsAsset: "",
     objectKeys: {
       drivers: "driver_profiles",
       fleet: "trucks",
@@ -89,16 +103,112 @@
 
   // Opportunity custom-field IDs the existing (already-live) AAA-GHL-Extractor
   // reconciliation tool writes to — copied verbatim from
-  // import_aaa_payments.py / native-host/src/main.go so this browser importer
-  // stays compatible with data that tool already wrote. See the UNVERIFIED
-  // note at the top of this file re: reusing these for a different client.
-  var WO_FIELD_IDS = ["gkJwODzLAFBtALkbUm54", "Oz3NeGwx2PxgrzaihYWl"];
-  var EXPECTED_TOW_AMOUNT_FIELD = "G3NwXSgdfozNGLPpxnzx";
-  var AAA_PAYMENT_ID_FIELD = "PwhfIoJkhnhlcLlU855m";
-  var AAA_GROSS_PAID_FIELD = "x6BZnE668LiqEk76S1TW";
-  var AAA_PAY_DATE_FIELD = "2ERL2vncdpLAjD027qXz";
-  var AAA_PAID_TOW_MILES_FIELD = "B3fIEak2zCjLV5Gjcy6U";
-  var AAA_PAYMENT_DIFFERENCE_FIELD = "lgDu30kVqm1wJGaCp8o3";
+  // import_aaa_payments.py / native-host/src/main.go. These are FALLBACKS
+  // ONLY now: GHL regenerates a new internal ID for every custom field when
+  // a snapshot is cloned into a new sub-account, even though the field
+  // *name* stays identical — so a hardcoded ID here would only ever work
+  // for CJ Taylor Towing's own location. resolveFieldIds() below looks these
+  // same fields up BY NAME through GHL's own customFields API instead, which
+  // works for any sub-account cloned from the same snapshot with zero
+  // per-client configuration. These constants are what resolveFieldIds()
+  // falls back to if a name lookup comes up empty (e.g. the token lacks the
+  // Custom Fields scope, or a field was renamed) — for CJ Taylor Towing's
+  // own location specifically, so today's live setup keeps working even
+  // before the dynamic path has been verified.
+  var FIELD_ID_FALLBACKS = {
+    workOrderNumber: ["gkJwODzLAFBtALkbUm54", "Oz3NeGwx2PxgrzaihYWl"],
+    expectedTowAmount: ["G3NwXSgdfozNGLPpxnzx"],
+    aaaPaymentId: ["PwhfIoJkhnhlcLlU855m"],
+    aaaGrossPaid: ["x6BZnE668LiqEk76S1TW"],
+    aaaPayDate: ["2ERL2vncdpLAjD027qXz"],
+    aaaPaidTowMiles: ["B3fIEak2zCjLV5Gjcy6U"],
+    aaaPaymentDifference: ["lgDu30kVqm1wJGaCp8o3"],
+  };
+
+  // Candidate GHL field *names* to match, case/whitespace-insensitive, per
+  // logical field. These are inferred from the labels the existing Python
+  // tool already prints for these same fields (import_aaa_payments.py's
+  // DIRECT_FIELD_MAP), not independently re-confirmed against a live
+  // customFields dump in this session — see the UNVERIFIED note at the top
+  // of this file. Re-run "Test connection" on a real sub-account and check
+  // the field-mapping result before trusting this on a new client; add a
+  // name variant here if a client's actual field is named slightly
+  // differently.
+  var FIELD_NAME_CANDIDATES = {
+    workOrderNumber: ["work order number"],
+    expectedTowAmount: ["expected tow amount"],
+    aaaPaymentId: ["aaa payment id"],
+    aaaGrossPaid: ["aaa gross paid amount"],
+    aaaPayDate: ["aaa pay date"],
+    aaaPaidTowMiles: ["aaa paid tow miles"],
+    aaaPaymentDifference: ["aaa payment difference"],
+  };
+
+  // Filled in by resolveFieldIds() (called from "Test connection" and again
+  // before any import run, so it's never stale). null until first resolved.
+  var resolvedFields = null; // { ids: {key: id|null}, source: {key: "name"|"fallback"|"missing"}, allFields: [...] }
+
+  // Looks up this location's actual custom field definitions and matches
+  // each logical AAA field by name. Confirmed real endpoint/shape — see
+  // AAA-GHL-Extractor's own LIST-GHL-FIELDS.command, which calls this same
+  // GET .../customFields (with and without ?model=opportunity) and reads
+  // {id, name, fieldKey, dataType} off each entry.
+  function fetchCustomFieldDefs(model) {
+    var path = "/locations/" + CONFIG.locationId + "/customFields" + (model ? "?model=" + encodeURIComponent(model) : "");
+    return ghlApi(path, { version: "v3" }).then(function (res) {
+      return Array.isArray(res) ? res : res.customFields || [];
+    });
+  }
+
+  function resolveFieldIds() {
+    return Promise.all([fetchCustomFieldDefs(), fetchCustomFieldDefs("opportunity")]).then(function (results) {
+      var byId = {};
+      results[0].concat(results[1]).forEach(function (f) {
+        if (f && f.id) byId[f.id] = f;
+      });
+      var allFields = Object.keys(byId).map(function (id) { return byId[id]; });
+      var ids = {};
+      var source = {};
+      Object.keys(FIELD_NAME_CANDIDATES).forEach(function (key) {
+        var candidates = FIELD_NAME_CANDIDATES[key];
+        var match = allFields.filter(function (f) {
+          return candidates.indexOf(String(f.name || "").trim().toLowerCase()) !== -1;
+        })[0];
+        if (match) {
+          ids[key] = match.id;
+          source[key] = "name";
+        } else if (FIELD_ID_FALLBACKS[key] && FIELD_ID_FALLBACKS[key][0]) {
+          ids[key] = FIELD_ID_FALLBACKS[key][0];
+          source[key] = "fallback";
+        } else {
+          ids[key] = null;
+          source[key] = "missing";
+        }
+      });
+      resolvedFields = { ids: ids, source: source, allFields: allFields };
+      return resolvedFields;
+    });
+  }
+
+  // Single-field-id accessor used everywhere below. Falls back to the
+  // hardcoded CJ-Taylor-Towing id if resolveFieldIds() hasn't run yet in
+  // this page load (shouldn't normally happen — callers run it first).
+  function fieldId(key) {
+    if (resolvedFields && resolvedFields.ids[key]) return resolvedFields.ids[key];
+    return (FIELD_ID_FALLBACKS[key] && FIELD_ID_FALLBACKS[key][0]) || null;
+  }
+  function fieldIdsFor(key) {
+    // getCustomField() below matches against a *list* of ids (to also catch
+    // older records written under a previous/renamed field) — resolved id
+    // first, then any fallback ids as extra candidates.
+    var out = [];
+    var resolved = resolvedFields && resolvedFields.ids[key];
+    if (resolved) out.push(resolved);
+    (FIELD_ID_FALLBACKS[key] || []).forEach(function (id) {
+      if (out.indexOf(id) === -1) out.push(id);
+    });
+    return out;
+  }
 
   // ---------------------------------------------------------------------
   // GHL API client (identical to dashboard.js)
@@ -256,11 +366,19 @@
   // Number on file. onProgress(done, total) reports per-opportunity fetch
   // progress for a UI progress bar.
   function buildWoMap(onProgress) {
-    return loadPipelines().then(function (pipelines) {
+    // Re-resolve every run (cheap — one or two GET calls) rather than trust
+    // a stale cache, since the config (and therefore the location) can
+    // change between runs in the same page load.
+    return resolveFieldIds().then(function () {
+      return loadPipelines();
+    }).then(function (pipelines) {
       var pipeline = pipelines.filter(function (p) {
         return (p.name || "").toLowerCase() === CONFIG.dispatchPipelineName.toLowerCase();
       })[0];
       if (!pipeline) throw new Error('No pipeline named "' + CONFIG.dispatchPipelineName + '" found in this GHL location.');
+      var woFieldIds = fieldIdsFor("workOrderNumber");
+      var paymentIdFieldIds = fieldIdsFor("aaaPaymentId");
+      var expectedFieldIds = fieldIdsFor("expectedTowAmount");
       return loadAllOpportunities(pipeline.id).then(function (opps) {
         return mapWithConcurrency(
           opps,
@@ -271,15 +389,15 @@
           var woMap = {};
           fullOpps.forEach(function (full) {
             if (!full) return;
-            var wo = getCustomField(full, WO_FIELD_IDS);
+            var wo = getCustomField(full, woFieldIds);
             if (!wo) return;
             wo = String(wo).trim();
             if (!wo) return;
             woMap[wo] = {
               id: full.id,
               name: full.name,
-              existingPaymentId: getCustomField(full, [AAA_PAYMENT_ID_FIELD]),
-              expectedTowAmount: parseMoney(getCustomField(full, [EXPECTED_TOW_AMOUNT_FIELD])),
+              existingPaymentId: getCustomField(full, paymentIdFieldIds),
+              expectedTowAmount: parseMoney(getCustomField(full, expectedFieldIds)),
             };
           });
           return { woMap: woMap, pipelineName: pipeline.name, opportunityCount: opps.length };
@@ -343,11 +461,11 @@
   // ---------------------------------------------------------------------
   function writeOpportunityFields(item) {
     var customFields = [];
-    if (item.paymentId) customFields.push({ id: AAA_PAYMENT_ID_FIELD, fieldValue: item.paymentId });
-    if (item.grossAmount !== null) customFields.push({ id: AAA_GROSS_PAID_FIELD, fieldValue: String(item.grossAmount) });
-    if (item.payDate) customFields.push({ id: AAA_PAY_DATE_FIELD, fieldValue: item.payDate });
-    if (item.towMileage) customFields.push({ id: AAA_PAID_TOW_MILES_FIELD, fieldValue: item.towMileage });
-    if (item.diff !== null) customFields.push({ id: AAA_PAYMENT_DIFFERENCE_FIELD, fieldValue: item.diff.toFixed(2) });
+    if (item.paymentId && fieldId("aaaPaymentId")) customFields.push({ id: fieldId("aaaPaymentId"), fieldValue: item.paymentId });
+    if (item.grossAmount !== null && fieldId("aaaGrossPaid")) customFields.push({ id: fieldId("aaaGrossPaid"), fieldValue: String(item.grossAmount) });
+    if (item.payDate && fieldId("aaaPayDate")) customFields.push({ id: fieldId("aaaPayDate"), fieldValue: item.payDate });
+    if (item.towMileage && fieldId("aaaPaidTowMiles")) customFields.push({ id: fieldId("aaaPaidTowMiles"), fieldValue: item.towMileage });
+    if (item.diff !== null && fieldId("aaaPaymentDifference")) customFields.push({ id: fieldId("aaaPaymentDifference"), fieldValue: item.diff.toFixed(2) });
     if (customFields.length === 0) return Promise.resolve({ skipped: true });
     return ghlApi("/opportunities/" + item.opp.id, {
       method: "PUT",
@@ -531,6 +649,8 @@
     applyReconciliation: applyReconciliation,
     sha256Hex: sha256Hex,
     loadPipelines: loadPipelines,
+    resolveFieldIds: resolveFieldIds,
+    FIELD_NAME_CANDIDATES: FIELD_NAME_CANDIDATES,
   };
 
   // ---------------------------------------------------------------------
@@ -611,7 +731,24 @@
     '#cjt-setup-root .cjtLockBtn{width:100%;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px;font-weight:600;font-size:13.5px;cursor:pointer;font-family:inherit}',
     '#cjt-setup-root .cjtLockBtn:hover{background:var(--accent-strong)}',
     '#cjt-setup-root .cjtLockError{color:var(--crit);font-size:12px;margin-top:8px;min-height:14px}',
-    '@media (prefers-reduced-motion:reduce){#cjt-setup-root *{animation-duration:.001s!important;transition-duration:.001s!important}}'
+    '@media (prefers-reduced-motion:reduce){#cjt-setup-root *{animation-duration:.001s!important;transition-duration:.001s!important}}',
+    // extInstall* rules are unscoped (not under #cjt-setup-root) because the
+    // checklist overlay is appended straight to <body> — see
+    // openInstallSteps() — so it always covers the full viewport
+    // regardless of where #cjt-setup-root sits on the page. Class names are
+    // deliberately distinctive to keep collisions with the host GHL page's
+    // own CSS unlikely.
+    '.extInstallOverlay{position:fixed;inset:0;background:rgba(20,25,40,.6);display:flex;align-items:center;justify-content:center;z-index:999999;padding:16px;font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
+    '.extInstallCard{position:relative;background:#fff;color:#1a2130;border-radius:14px;padding:26px 26px 22px;max-width:420px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.28);max-height:82vh;overflow-y:auto}',
+    '.extInstallClose{position:absolute;top:14px;right:14px;border:none;background:none;font-size:20px;line-height:1;cursor:pointer;color:#626b7a;padding:4px}',
+    '.extInstallClose:hover{color:#1a2130}',
+    '.extInstallTitle{font-size:17px;font-weight:700;margin-bottom:4px;padding-right:20px}',
+    '.extInstallSub{font-size:12.5px;color:#626b7a;line-height:1.5;margin-bottom:16px}',
+    '.extInstallSteps{list-style:none;margin:0 0 18px;padding:0;display:flex;flex-direction:column;gap:12px}',
+    '.extInstallSteps li{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5}',
+    '.extInstallSteps .stepNum{flex:0 0 auto;width:20px;height:20px;border-radius:999px;background:#e7edfc;color:#1d4ed8;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:1px}',
+    '.extInstallSteps .stepText b{font-weight:700}',
+    '.extInstallSteps .mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef1f5;padding:1px 5px;border-radius:4px;font-size:12px}'
   ].join("\n");
 
   var PAGE_HTML =
@@ -627,6 +764,7 @@
     '<div class="field"><label for="fPipeline">Dispatch pipeline name</label><input type="text" id="fPipeline" placeholder="Towing Dispatch"><div class="hint">Must match a real pipeline name in this GHL location, exactly.</div></div>' +
     '<div class="btnRow"><button type="button" class="btn primary" id="btnTestConn">Test connection</button></div>' +
     '<div class="statusMsg" id="connStatus"></div>' +
+    '<div id="fieldMapWrap"></div>' +
     '</div>' +
 
     '<div class="card" id="cardPricing"><h2>2. Pricing</h2>' +
@@ -661,6 +799,11 @@
     '<div id="importSummary"></div>' +
     '<div id="importTableWrap"></div>' +
     '<div id="applyWrap"></div>' +
+    '</div>' +
+
+    '<div class="card" id="cardExtension"><h2>6. AAA Work Order Extractor (browser extension)</h2>' +
+    '<div class="cardDesc">The dispatcher-side companion tool: it reads an AAA work order page and can sync it straight into this pipeline. It runs entirely on the dispatcher\'s own computer — no GHL token is ever stored in the extension itself. Download it, unzip it, and run the installer once per computer that needs it.</div>' +
+    '<div id="extDownloadWrap"></div>' +
     '</div>' +
 
     '<div class="foot-note" id="footNote">Field IDs for AAA reconciliation on the Opportunity are specific to this GHL location — see the note at the top of setup.js before reusing this for a different client.</div>' +
@@ -788,12 +931,13 @@
 
   function runApp(root) {
     var els = {};
-    ["fLocationId", "fToken", "fTokenToggle", "fGhlBase", "fPipeline", "btnTestConn", "connStatus",
+    ["fLocationId", "fToken", "fTokenToggle", "fGhlBase", "fPipeline", "btnTestConn", "connStatus", "fieldMapWrap",
      "fBaseRate", "fMileRate",
      "fSetupUrl", "fPasscode", "fPasscode2", "fIdleMin", "secStatus",
      "btnGenerate", "snippetOut", "btnCopySnippet", "snippetStatus",
      "fFile", "togglePaste", "pasteWrap", "fPaste", "btnPreview",
-     "importProgress", "importProgressBar", "importProgressLabel", "importStatus", "importSummary", "importTableWrap", "applyWrap"
+     "importProgress", "importProgressBar", "importProgressLabel", "importStatus", "importSummary", "importTableWrap", "applyWrap",
+     "extDownloadWrap"
     ].forEach(function (id) { els[id] = root.querySelector("#" + id); });
 
     // ---- Prefill from CONFIG (whatever was pasted in window.CJT_CONFIG) ----
@@ -833,6 +977,31 @@
     }
 
     // ---- 1. Test connection ----
+    var FIELD_LABELS = {
+      workOrderNumber: "Work Order Number",
+      expectedTowAmount: "Expected Tow Amount",
+      aaaPaymentId: "AAA Payment ID",
+      aaaGrossPaid: "AAA Gross Paid Amount",
+      aaaPayDate: "AAA Pay Date",
+      aaaPaidTowMiles: "AAA Paid Tow Miles",
+      aaaPaymentDifference: "AAA Payment Difference",
+    };
+    function renderFieldMap(resolved) {
+      var rows = Object.keys(FIELD_LABELS).map(function (key) {
+        var src = resolved.source[key];
+        var pillClass = src === "name" ? "status-matched" : src === "fallback" ? "status-exception" : "status-unmatched";
+        var pillText = src === "name" ? "found by name" : src === "fallback" ? "using fallback ID" : "not found";
+        return "<tr><td>" + esc(FIELD_LABELS[key]) + '</td><td><span class="status-pill ' + pillClass + '">' + pillText + "</span></td></tr>";
+      }).join("");
+      var anyFallbackOrMissing = Object.keys(resolved.source).some(function (k) { return resolved.source[k] !== "name"; });
+      els.fieldMapWrap.innerHTML =
+        '<div class="hint" style="margin-top:12px;margin-bottom:4px;">AAA reconciliation field mapping (looked up by name in this GHL location):</div>' +
+        '<div class="tableWrap"><table><thead><tr><th>Field</th><th>Status</th></tr></thead><tbody>' + rows + "</tbody></table></div>" +
+        (anyFallbackOrMissing
+          ? '<div class="hint" style="margin-top:8px;">Anything not "found by name" means this location\'s custom field is either missing or named differently than expected — AAA import will be unreliable until that\'s fixed. If this is a client whose sub-account came from your snapshot, the field names should match exactly; double check spelling/capitalization in GHL if not.</div>'
+          : '<div class="hint" style="margin-top:8px;">All AAA fields matched by name — the import should work on this location without any hardcoded IDs.</div>');
+    }
+
     els.btnTestConn.addEventListener("click", function () {
       var live = liveConfigFromForm();
       if (!live.locationId || !live.privateToken) {
@@ -842,6 +1011,7 @@
       Object.assign(CONFIG, live);
       els.btnTestConn.disabled = true;
       showStatus(els.connStatus, "info", "Testing…");
+      els.fieldMapWrap.innerHTML = "";
       loadPipelines()
         .then(function (pipelines) {
           var names = pipelines.map(function (p) { return p.name; });
@@ -851,6 +1021,7 @@
           } else {
             showStatus(els.connStatus, "err", "Connected, but no pipeline named “" + CONFIG.dispatchPipelineName + "” was found. Pipelines here: " + names.join(", "));
           }
+          return resolveFieldIds().then(renderFieldMap);
         })
         .catch(function (err) {
           showStatus(els.connStatus, "err", "Connection failed: " + err.message);
@@ -1055,5 +1226,108 @@
         })
         .finally(function () { els.btnPreview.disabled = false; });
     });
+
+    // ---- 6. Extension download (GitHub Releases, OS-detected) ----
+    // A webpage can never install or run software on a visitor's computer
+    // by itself — this only gets them the right zip with one click. The
+    // actual install (unzip + run the .command/.exe installer) still
+    // happens locally, once, on each computer that needs the extension.
+    // The URL below is GitHub's stable "always the newest Release" link,
+    // same pattern as the dashboard's own jsDelivr @latest — publishing a
+    // new GitHub Release with the same asset filename is the only thing
+    // that has to happen to ship an update; this link never changes.
+    function detectOS() {
+      var ua = (navigator.userAgent || "") + " " + (navigator.platform || "");
+      if (/Win/i.test(ua)) return "windows";
+      if (/Mac|iPhone|iPad|iPod/i.test(ua)) return "mac";
+      return "other";
+    }
+    function releaseAssetUrl(repo, asset) {
+      return "https://github.com/" + repo + "/releases/latest/download/" + encodeURIComponent(asset);
+    }
+
+    // installSteps/openInstallSteps: the on-page checklist that pops up the
+    // instant someone clicks a download button, so the guidance reads as
+    // part of that click even though the file-save itself is the browser's
+    // own UI (see the comment above detectOS — no page can skin or
+    // automate that part, on any site). The overlay is appended to <body>,
+    // not #cjt-setup-root, so it always covers the full viewport.
+    function installSteps(kind) {
+      if (kind === "mac") {
+        return [
+          "Your download has started in the browser (its own download bar/notification, not this page) — wait for it to finish.",
+          'Open your Downloads folder and double-click <span class="mono">AAA-GHL-Extractor-Mac.zip</span> to unzip it (Safari/Chrome often do this automatically).',
+          'Open the unzipped <span class="mono">AAA-GHL-Extractor-Mac</span> folder.',
+          '<b>Right-click</b> <span class="mono">INSTALL-MAC.command</span> and choose <b>Open</b> — do not double-click it. macOS blocks it the first time as "from an unidentified developer"; right-click → Open tells macOS to trust it, once.',
+          "Click <b>Open</b> again in the confirmation dialog. A Terminal window runs the installer — follow its prompts (same GHL token/location ID it's always asked for).",
+          'When it finishes, open an AAA Work Order page — the extension icon should show "Connected." If it doesn\'t, double-click <span class="mono">CHECK-SETUP.command</span> in that same folder for a diagnostic.'
+        ];
+      }
+      if (kind === "windows") {
+        return ["A Windows build isn't published yet — this checklist will be filled in once it ships."];
+      }
+      return [];
+    }
+    function openInstallSteps(kind) {
+      var overlay = document.createElement("div");
+      overlay.className = "extInstallOverlay";
+      var stepsHtml = installSteps(kind)
+        .map(function (s, i) {
+          return '<li><span class="stepNum">' + (i + 1) + '</span><span class="stepText">' + s + "</span></li>";
+        })
+        .join("");
+      overlay.innerHTML =
+        '<div class="extInstallCard">' +
+        '<button type="button" class="extInstallClose" aria-label="Close">&times;</button>' +
+        '<div class="extInstallTitle">' + (kind === "mac" ? "Installing on Mac" : "Installing on Windows") + "</div>" +
+        '<div class="extInstallSub">Follow these steps once the download above finishes.</div>' +
+        '<ol class="extInstallSteps">' + stepsHtml + "</ol>" +
+        '<div class="btnRow"><button type="button" class="btn primary extInstallDone">Got it</button></div>' +
+        "</div>";
+      document.body.appendChild(overlay);
+      function close() {
+        overlay.remove();
+        document.removeEventListener("keydown", onKey);
+      }
+      function onKey(e) { if (e.key === "Escape") close(); }
+      overlay.querySelector(".extInstallClose").addEventListener("click", close);
+      overlay.querySelector(".extInstallDone").addEventListener("click", close);
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+      document.addEventListener("keydown", onKey);
+    }
+
+    function renderExtensionDownload() {
+      var repo = (CONFIG.extensionRepo || "").trim();
+      var macAsset = (CONFIG.extensionMacAsset || "").trim();
+      var winAsset = (CONFIG.extensionWindowsAsset || "").trim();
+      if (!repo) {
+        els.extDownloadWrap.innerHTML = '<div class="hint">Set <span class="mono">extensionRepo</span> in CJT_CONFIG (e.g. "your-org/cjt-ops-dashboard") to show download buttons here.</div>';
+        return;
+      }
+      var os = detectOS();
+      var macBtn = macAsset
+        ? '<a class="btn primary" data-os="mac" href="' + esc(releaseAssetUrl(repo, macAsset)) + '" download>Download for Mac</a>'
+        : '<button type="button" class="btn" disabled>Download for Mac (not published yet)</button>';
+      var winBtn = winAsset
+        ? '<a class="btn primary" data-os="windows" href="' + esc(releaseAssetUrl(repo, winAsset)) + '" download>Download for Windows</a>'
+        : '<button type="button" class="btn" disabled title="A Windows build is planned but not built yet">Download for Windows (coming soon)</button>';
+      var buttons = os === "windows" ? [winBtn, macBtn] : [macBtn, winBtn];
+      var osNote =
+        os === "mac" ? "Looks like you're on a Mac — that's the one to use. "
+        : os === "windows" ? "Looks like you're on Windows — a Windows build isn't ready yet; check back soon, or use a Mac in the meantime. "
+        : "";
+      els.extDownloadWrap.innerHTML =
+        '<div class="btnRow">' + buttons.join("") + "</div>" +
+        '<div class="hint" style="margin-top:10px;">' + osNote +
+        "Click a button to start the download — a step-by-step install checklist pops up here right away to walk you through the rest. This button only starts the download; the actual install still happens on that computer, same as any other desktop software." +
+        "</div>";
+      // Don't preventDefault on click — the browser's own download must
+      // still fire normally. This only opens the on-page checklist for
+      // what to do once that download lands.
+      Array.prototype.forEach.call(els.extDownloadWrap.querySelectorAll("a.btn[data-os]"), function (a) {
+        a.addEventListener("click", function () { openInstallSteps(a.getAttribute("data-os")); });
+      });
+    }
+    renderExtensionDownload();
   }
 })();
