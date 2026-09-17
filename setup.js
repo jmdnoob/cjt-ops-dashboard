@@ -133,19 +133,18 @@
     aaaGrossPaid: ["x6BZnE668LiqEk76S1TW"],
     aaaPayDate: ["2ERL2vncdpLAjD027qXz"],
     aaaPaidTowMiles: ["B3fIEak2zCjLV5Gjcy6U"],
-    // No fallback ID for this one (2026-09-17): the old field
-    // ("lgDu30kVqm1wJGaCp8o3") was Monetary-typed, and GHL confirmed live
-    // that Monetary fields silently store negative values as positive —
-    // not fixable in place, since GHL doesn't allow changing an existing
-    // field's type. It was deleted and recreated as a Single Line (text)
-    // field of the same name, which stores the sign correctly, so it has
-    // a brand-new ID. Pasting that new ID in here would just go stale
-    // again the next time this field is ever recreated, and (per the
-    // comment above this block) never worked for any other client's
-    // sub-account anyway — so this now relies entirely on the by-name
-    // lookup above. If "Test connection" ever shows this one as
-    // "not found," it means the field's name changed or the token lacks
-    // the Custom Fields scope — not that this fallback needs updating.
+    // No fallback ID for this one, deliberately (2026-09-17). GHL doesn't
+    // allow changing an existing field's type, so this field has already
+    // been deleted and recreated twice in one day chasing the right type:
+    // Monetary (original) -> GHL confirmed live it silently stores
+    // negative values as positive -> Single Line/text (fixed the sign,
+    // but text can't be summed by GHL's own report-widget math) ->
+    // Number (current: signed AND summable). Each recreation got a brand
+    // new ID, so pasting any one of them in here would only go stale
+    // again next time. It relies entirely on the by-name lookup above. If
+    // "Test connection" ever shows this one as "not found," it means the
+    // field's name changed or the token lacks the Custom Fields scope —
+    // not that this fallback needs updating.
     aaaPaymentDifference: [],
   };
 
@@ -499,7 +498,14 @@
     if (item.grossAmount !== null && fieldId("aaaGrossPaid")) customFields.push({ id: fieldId("aaaGrossPaid"), fieldValue: String(item.grossAmount) });
     if (item.payDate && fieldId("aaaPayDate")) customFields.push({ id: fieldId("aaaPayDate"), fieldValue: item.payDate });
     if (item.towMileage && fieldId("aaaPaidTowMiles")) customFields.push({ id: fieldId("aaaPaidTowMiles"), fieldValue: item.towMileage });
-    if (item.diff !== null && fieldId("aaaPaymentDifference")) customFields.push({ id: fieldId("aaaPaymentDifference"), fieldValue: item.diff.toFixed(2) });
+    // AAA Payment Difference is a Number-type field (2026-09-17, after the
+    // Single Line/text version this same day couldn't be summed in
+    // dashboard report widgets) — sent as a plain rounded JS number, the
+    // same way the already-working Number field above (AAA Paid Tow Miles)
+    // is, NOT a formatted string like the Monetary fields further up.
+    // Math.round(...*100)/100 avoids floating-point noise from the
+    // grossAmount - expected subtraction (e.g. 19.999999999998).
+    if (item.diff !== null && fieldId("aaaPaymentDifference")) customFields.push({ id: fieldId("aaaPaymentDifference"), fieldValue: Math.round(item.diff * 100) / 100 });
     if (customFields.length === 0) return Promise.resolve({ skipped: true });
     return ghlApi("/opportunities/" + item.opp.id, {
       method: "PUT",
