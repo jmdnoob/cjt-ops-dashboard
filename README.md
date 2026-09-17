@@ -154,10 +154,12 @@ Release with the same asset filename is the only step needed to ship an
 update; the button and every client's pasted snippet never change.
 `extensionRepo` defaults to this repo (`jmdnoob/cjt-ops-dashboard`) but can
 be overridden per deployment via `CJT_CONFIG.extensionRepo` (e.g. a
-reseller's own fork). A Windows build is not built yet — the button shows
-"coming soon" and stays disabled until `CJT_CONFIG.extensionWindowsAsset`
-is set to a real asset filename, at which point it activates automatically
-with no other code change needed.
+reseller's own fork). A Windows build now ships too (2026-09-17) — attach
+`AAA-GHL-Extractor-Windows-v1.0.0.zip` to the same Release alongside the Mac
+zip; `setup.js`'s `DEFAULTS.extensionWindowsAsset` already points at that
+exact filename, so the Windows button activates as soon as the Release has
+that asset. Same "publish a new Release with the same asset filename to
+ship an update" rule applies to both platforms.
 
 **The extension's own field-ID bug (fixed 2026-09-17).** The native bridge
 (`native-host/src/main.go`) had the exact same class of bug `setup.js` had:
@@ -242,13 +244,6 @@ not against live traffic. Before relying on this in front of a client:
 
 ## Not yet built
 
-- A Windows build of the AAA Work Order Extractor extension/bridge — the
-  Setup page's download button already has a slot for it
-  (`extensionWindowsAsset`) and shows "coming soon" until one exists.
-  Porting the Go native host itself is close to free (already
-  cross-compiles with `GOOS=windows`); the real work is the
-  Windows-Registry-based native-messaging-host registration and rewriting
-  the `.command` installer scripts as their Windows/PowerShell equivalents.
 - Chrome extension self-hosted auto-update (`update_url` manifest mechanism)
   for the separate `AAA-GHL-Extractor` browser-extension product — today,
   shipping a new version means publishing a new GitHub Release (see
