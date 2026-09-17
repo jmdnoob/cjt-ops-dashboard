@@ -762,10 +762,16 @@
     '.extInstallClose:hover{color:#1a2130}',
     '.extInstallTitle{font-size:17px;font-weight:700;margin-bottom:4px;padding-right:20px}',
     '.extInstallSub{font-size:12.5px;color:#626b7a;line-height:1.5;margin-bottom:16px}',
-    '.extInstallSteps{list-style:none;margin:0 0 18px;padding:0;display:flex;flex-direction:column;gap:12px}',
+    '.extInstallSteps{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:12px}',
     '.extInstallSteps li{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5}',
     '.extInstallSteps .stepNum{flex:0 0 auto;width:20px;height:20px;border-radius:999px;background:#e7edfc;color:#1d4ed8;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:1px}',
-    '.extInstallSteps .stepText b{font-weight:700}',
+    '.extInstallSteps li.done .stepNum{background:#dcfce7;color:#15803d}',
+    '.extInstallSteps label.stepText{display:flex;gap:8px;align-items:flex-start;flex:1;min-width:0;cursor:pointer}',
+    '.extInstallSteps label.stepText input[type="checkbox"]{flex:0 0 auto;width:15px;height:15px;margin-top:2px;accent-color:#1d4ed8;cursor:pointer}',
+    '.extInstallSteps .stepTxt b{font-weight:700}',
+    '.extInstallSteps li.done .stepTxt{color:#8a92a3;text-decoration:line-through}',
+    '.extInstallProgress{font-size:11.5px;color:#8a92a3;margin:0 0 14px}',
+    '.extInstallReset{background:none;border:none;padding:0;font-size:12px;color:#1d4ed8;cursor:pointer;text-decoration:underline}',
     '.extInstallSteps .mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef1f5;padding:1px 5px;border-radius:4px;font-size:12px}'
   ].join("\n");
 
@@ -1278,11 +1284,12 @@
       if (kind === "mac") {
         return [
           "Your download has started in the browser (its own download bar/notification, not this page) — wait for it to finish.",
-          'Open your Downloads folder and double-click <span class="mono">AAA-GHL-Extractor-Mac.zip</span> to unzip it (Safari/Chrome often do this automatically).',
+          'Open your Downloads folder and double-click <span class="mono">AAA-GHL-Extractor-Mac.zip</span> to unzip it (Safari often does this automatically right after the download finishes).',
           'Open the unzipped <span class="mono">AAA-GHL-Extractor-Mac</span> folder.',
           '<b>Right-click</b> <span class="mono">INSTALL-MAC.command</span> and choose <b>Open</b> — do not double-click it. macOS blocks it the first time as "from an unidentified developer"; right-click → Open tells macOS to trust it, once.',
           "Click <b>Open</b> again in the confirmation dialog. A Terminal window runs the installer — follow its prompts (same GHL token/location ID it's always asked for).",
-          'When it finishes, open an AAA Work Order page — the extension icon should show "Connected." If it doesn\'t, double-click <span class="mono">CHECK-SETUP.command</span> in that same folder for a diagnostic.'
+          'When the installer finishes, it opens Microsoft Edge to <span class="mono">edge://extensions</span> and opens the extension folder in Finder for you — turn on <b>Developer mode</b> (bottom-left), click <b>Load unpacked</b>, and select the <span class="mono">aaa-browser-extension</span> folder Finder opened to.',
+          'Open an AAA Work Order page — the extension icon should show "Connected." If it doesn\'t, double-click <span class="mono">CHECK-SETUP.command</span> in that same folder for a diagnostic.'
         ];
       }
       if (kind === "windows") {
@@ -1298,23 +1305,88 @@
       }
       return [];
     }
+    // Checklist progress persists per-computer (localStorage), keyed by OS,
+    // so closing the popup — or leaving the page and coming back later to
+    // finish install — doesn't lose which steps were already done. This is
+    // a per-browser convenience only: it never leaves this machine and
+    // nothing here is synced anywhere.
+    function installProgressKey(kind) { return "cjtExtInstallProgress_" + kind; }
+    function loadProgress(kind) {
+      try {
+        var raw = window.localStorage.getItem(installProgressKey(kind));
+        var arr = raw ? JSON.parse(raw) : [];
+        return Array.isArray(arr) ? arr : [];
+      } catch (e) { return []; }
+    }
+    function saveProgress(kind, idxArr) {
+      try { window.localStorage.setItem(installProgressKey(kind), JSON.stringify(idxArr)); } catch (e) { /* private/blocked storage — checklist still works, just won't persist */ }
+    }
     function openInstallSteps(kind) {
+      var steps = installSteps(kind);
+      var checkedIdx = {};
+      loadProgress(kind).forEach(function (i) { checkedIdx[i] = true; });
+
       var overlay = document.createElement("div");
       overlay.className = "extInstallOverlay";
-      var stepsHtml = installSteps(kind)
+      var stepsHtml = steps
         .map(function (s, i) {
-          return '<li><span class="stepNum">' + (i + 1) + '</span><span class="stepText">' + s + "</span></li>";
+          var isDone = !!checkedIdx[i];
+          return (
+            '<li class="' + (isDone ? "done" : "") + '">' +
+            '<span class="stepNum">' + (i + 1) + "</span>" +
+            '<label class="stepText">' +
+            '<input type="checkbox" data-idx="' + i + '"' + (isDone ? " checked" : "") + ">" +
+            '<span class="stepTxt">' + s + "</span>" +
+            "</label>" +
+            "</li>"
+          );
         })
         .join("");
       overlay.innerHTML =
         '<div class="extInstallCard">' +
         '<button type="button" class="extInstallClose" aria-label="Close">&times;</button>' +
         '<div class="extInstallTitle">' + (kind === "mac" ? "Installing on Mac" : "Installing on Windows") + "</div>" +
-        '<div class="extInstallSub">Follow these steps once the download above finishes.</div>' +
+        '<div class="extInstallSub">Follow these steps once the download above finishes. Check each one off as you go — your progress is saved on this computer, so it’s still here if you close this and come back.</div>' +
         '<ol class="extInstallSteps">' + stepsHtml + "</ol>" +
-        '<div class="btnRow"><button type="button" class="btn primary extInstallDone">Got it</button></div>' +
+        '<div class="extInstallProgress"><span class="extInstallProgressText"></span> · <button type="button" class="extInstallReset">Reset checklist</button></div>' +
+        '<div class="btnRow"><button type="button" class="btn primary extInstallDone">Close</button></div>' +
         "</div>";
       document.body.appendChild(overlay);
+
+      var progressText = overlay.querySelector(".extInstallProgressText");
+      function refreshProgressText() {
+        var done = overlay.querySelectorAll(".extInstallSteps input[type=checkbox]:checked").length;
+        progressText.textContent = done + " of " + steps.length + " done";
+      }
+      refreshProgressText();
+
+      function persist() {
+        var idxs = [];
+        Array.prototype.forEach.call(overlay.querySelectorAll(".extInstallSteps input[type=checkbox]:checked"), function (cb) {
+          idxs.push(Number(cb.getAttribute("data-idx")));
+        });
+        saveProgress(kind, idxs);
+      }
+
+      Array.prototype.forEach.call(overlay.querySelectorAll(".extInstallSteps input[type=checkbox]"), function (cb) {
+        cb.addEventListener("change", function () {
+          var li = cb.closest("li");
+          if (li) li.classList.toggle("done", cb.checked);
+          refreshProgressText();
+          persist();
+        });
+      });
+
+      overlay.querySelector(".extInstallReset").addEventListener("click", function () {
+        Array.prototype.forEach.call(overlay.querySelectorAll(".extInstallSteps input[type=checkbox]"), function (cb) {
+          cb.checked = false;
+          var li = cb.closest("li");
+          if (li) li.classList.remove("done");
+        });
+        refreshProgressText();
+        saveProgress(kind, []);
+      });
+
       function close() {
         overlay.remove();
         document.removeEventListener("keydown", onKey);
@@ -1322,7 +1394,9 @@
       function onKey(e) { if (e.key === "Escape") close(); }
       overlay.querySelector(".extInstallClose").addEventListener("click", close);
       overlay.querySelector(".extInstallDone").addEventListener("click", close);
-      overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+      // Deliberately no "click outside the card to close" — someone mid-way
+      // through checking off steps shouldn't be able to lose the popup with
+      // one stray click. Explicit X, Close button, or Escape only.
       document.addEventListener("keydown", onKey);
     }
 
