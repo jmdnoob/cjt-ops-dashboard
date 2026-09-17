@@ -81,7 +81,7 @@
     // convention this points at.
     extensionRepo: "jmdnoob/cjt-ops-dashboard",
     extensionMacAsset: "AAA-GHL-Extractor-Mac.zip",
-    extensionWindowsAsset: "",
+    extensionWindowsAsset: "AAA-GHL-Extractor-Windows-v1.0.0.zip",
     objectKeys: {
       drivers: "driver_profiles",
       fleet: "trucks",
@@ -1264,7 +1264,15 @@
         ];
       }
       if (kind === "windows") {
-        return ["A Windows build isn't published yet — this checklist will be filled in once it ships."];
+        return [
+          "Your download has started in the browser (its own download bar/notification, not this page) — wait for it to finish.",
+          'Open your Downloads folder, right-click <span class="mono">AAA-GHL-Extractor-Windows-v1.0.0.zip</span>, and choose <b>Extract All…</b> to unzip it.',
+          'Open the unzipped <span class="mono">AAA-GHL-Extractor-Windows-v1.0.0</span> folder.',
+          'Double-click <span class="mono">INSTALL-WINDOWS.bat</span>. If you see a blue "Windows protected your PC" SmartScreen screen, click <b>More info</b>, then <b>Run anyway</b> — this is expected for a script that isn\'t signed with a paid certificate, not a sign anything is wrong.',
+          "A console window runs the installer — follow its prompts (same GHL token/location ID it's always asked for). Press Enter to close it when it's done.",
+          'When it finishes, Edge opens to <span class="mono">edge://extensions</span> — turn on <b>Developer mode</b> (bottom-left), click <b>Load unpacked</b>, and select the <span class="mono">aaa-browser-extension</span> folder inside the unzipped folder (File Explorer opens there for you).',
+          'Open an AAA Work Order page — the extension icon should show "Connected." If it doesn\'t, double-click <span class="mono">CHECK-SETUP-WINDOWS.bat</span> in that same folder for a diagnostic.'
+        ];
       }
       return [];
     }
@@ -1314,7 +1322,7 @@
       var buttons = os === "windows" ? [winBtn, macBtn] : [macBtn, winBtn];
       var osNote =
         os === "mac" ? "Looks like you're on a Mac — that's the one to use. "
-        : os === "windows" ? "Looks like you're on Windows — a Windows build isn't ready yet; check back soon, or use a Mac in the meantime. "
+        : os === "windows" ? "Looks like you're on Windows — that's the one to use. "
         : "";
       els.extDownloadWrap.innerHTML =
         '<div class="btnRow">' + buttons.join("") + "</div>" +
