@@ -25,7 +25,15 @@
  *       setupUrl: "https://THEIRDOMAIN.com/setup"
  *     };
  *   </script>
- *   <script src="https://cdn.jsdelivr.net/gh/YOUR_GH_ORG/cjt-ops-dashboard@latest/setup.js"></script>
+ *   <script src="https://cdn.jsdelivr.net/gh/YOUR_GH_ORG/cjt-ops-dashboard@main/setup.js"></script>
+ *
+ * IMPORTANT: use "@main" here, not "@latest". On jsDelivr, "@latest" for a
+ * GitHub-sourced file resolves to the repo's latest git TAG (e.g. a GitHub
+ * Release), not the newest commit — so the moment this repo publishes any
+ * Release (for the browser-extension zips, say), "@latest" freezes
+ * dashboard.js/setup.js at whatever commit existed at that tag, silently
+ * serving stale code until another Release is cut. "@main" always tracks
+ * the newest commit on the main branch directly and has none of this trap.
  *
  * Optional: extensionRepo/extensionMacAsset/extensionWindowsAsset in
  * CJT_CONFIG control the "6. AAA Work Order Extractor" download button
@@ -1070,7 +1078,7 @@
             '<script>\n' +
             "  window.CJT_CONFIG = " + JSON.stringify(cfgForSnippet, null, 2) + ";\n" +
             "<\/script>\n" +
-            '<script src="https://cdn.jsdelivr.net/gh/YOUR_GH_ORG/cjt-ops-dashboard@latest/dashboard.js"><\/script>\n\n' +
+            '<script src="https://cdn.jsdelivr.net/gh/' + (CONFIG.extensionRepo || "jmdnoob/cjt-ops-dashboard") + '@main/dashboard.js"><\/script>\n\n' +
             "<!-- Paste this SAME block onto this Setup page too, swapping the last\n" +
             '     script src for setup.js and the div id for "cjt-setup-root". -->';
           els.snippetOut.value = snippet;
@@ -1232,10 +1240,14 @@
     // by itself — this only gets them the right zip with one click. The
     // actual install (unzip + run the .command/.exe installer) still
     // happens locally, once, on each computer that needs the extension.
-    // The URL below is GitHub's stable "always the newest Release" link,
-    // same pattern as the dashboard's own jsDelivr @latest — publishing a
-    // new GitHub Release with the same asset filename is the only thing
-    // that has to happen to ship an update; this link never changes.
+    // The URL below is GitHub's stable "always the newest Release" link —
+    // publishing a new GitHub Release with the same asset filename is the
+    // only thing that has to happen to ship an update; this link never
+    // changes. Unlike this URL, dashboard.js/setup.js are loaded via
+    // jsDelivr's "@main" (not "@latest" — see the top-of-file comment),
+    // since those files should always track the newest commit, not a
+    // Release tag; the two mechanisms are intentionally different because
+    // Releases here version the extension zips, not this dashboard code.
     function detectOS() {
       var ua = (navigator.userAgent || "") + " " + (navigator.platform || "");
       if (/Win/i.test(ua)) return "windows";
