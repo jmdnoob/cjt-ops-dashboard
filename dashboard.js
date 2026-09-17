@@ -154,6 +154,18 @@
     return next();
   }
 
+  // GHL's REST API needs a custom object's schemaKey fully qualified as
+  // "custom_objects.<key>" in the URL path (confirmed 2026-09-17 against a
+  // real location's GET /objects/ listing — a bare key like "trucks" is
+  // rejected with 400 "Invalid Key Passed"). CONFIG.objectKeys stays as the
+  // short/bare form because ghlUrl()'s "open in GHL" deep-links use that
+  // same short form in their own, unrelated URL scheme (/v2/location/:id/
+  // objects/:key/list) — only the REST API calls need this prefix, so it's
+  // applied here at the point of use rather than baked into CONFIG.objectKeys.
+  function objectSchemaKey(shortKey) {
+    return "custom_objects." + shortKey;
+  }
+
   // Paginates POST /objects/:schemaKey/records/search using searchAfter.
   function loadAllObjectRecords(schemaKey) {
     var pageLimit = 100;
@@ -161,7 +173,7 @@
     function next(searchAfter) {
       var body = { locationId: CONFIG.locationId, page: 1, pageLimit: pageLimit, query: "" };
       if (searchAfter) body.searchAfter = searchAfter;
-      return ghlApi("/objects/" + schemaKey + "/records/search", { method: "POST", version: CONFIG.apiVersions.objects, body: body }).then(function (res) {
+      return ghlApi("/objects/" + objectSchemaKey(schemaKey) + "/records/search", { method: "POST", version: CONFIG.apiVersions.objects, body: body }).then(function (res) {
         var batch = res.records || [];
         all = all.concat(batch);
         if (batch.length < pageLimit || all.length > 5000) return all;

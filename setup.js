@@ -242,6 +242,16 @@
     });
   }
 
+  // GHL's REST API needs a custom object's schemaKey fully qualified as
+  // "custom_objects.<key>" in the URL path (confirmed 2026-09-17 against a
+  // real location's GET /objects/ listing — a bare key like "aaa_payments"
+  // is rejected with 400 "Invalid Key Passed"). CONFIG.objectKeys stays as
+  // the short/bare form since it's also usable elsewhere in its short form;
+  // this prefix is applied only at the point an actual REST call is made.
+  function objectSchemaKey(shortKey) {
+    return "custom_objects." + shortKey;
+  }
+
   function qs(params) {
     return Object.keys(params)
       .filter(function (k) { return params[k] !== undefined && params[k] !== null && params[k] !== ""; })
@@ -492,7 +502,7 @@
       reconciliation_status: item.status,
       exception_reason: item.exceptionReason || null,
     };
-    return ghlApi("/objects/" + CONFIG.objectKeys.aaa + "/records", {
+    return ghlApi("/objects/" + objectSchemaKey(CONFIG.objectKeys.aaa) + "/records", {
       method: "POST",
       version: CONFIG.apiVersions.objects,
       body: { locationId: CONFIG.locationId, properties: properties },
@@ -509,7 +519,7 @@
       reconciliation_status: "unmatched",
       exception_reason: "No matching Tow Opportunity for Work Order Number.",
     };
-    return ghlApi("/objects/" + CONFIG.objectKeys.aaa + "/records", {
+    return ghlApi("/objects/" + objectSchemaKey(CONFIG.objectKeys.aaa) + "/records", {
       method: "POST",
       version: CONFIG.apiVersions.objects,
       body: { locationId: CONFIG.locationId, properties: properties },
