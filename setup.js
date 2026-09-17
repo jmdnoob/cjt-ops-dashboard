@@ -45,15 +45,18 @@
  * the dashboard page and this Setup page — there is no shared backend, the
  * GHL page source *is* the config, on both pages independently.
  *
+ * CONFIRMED (2026-09-17) — the write shape for POST /objects/aaa_payments/
+ * records: gross_paid_amount and expected_tow_amount are Monetary-typed
+ * properties on this schema and GHL rejects a bare number for them with
+ * 400 "... is missing a currency code." They must be sent the same
+ * {currency, value} shape they read back as (see propVal() in
+ * dashboard.js and moneyProp() below) — confirmed against a real captured
+ * aaa_payments record, whose currency code is the literal string
+ * "default" (not an ISO code like "USD"). payment_difference_value is a
+ * plain Number-typed property on this schema and stays a bare number.
+ *
  * UNVERIFIED — confirm against a real token before relying on this in front
  * of a client (see README.md "What still needs testing"):
- *   - The exact write shape for POST /objects/aaa_payments/records — this
- *     file writes currency-shaped properties (gross_paid_amount,
- *     expected_tow_amount, payment_difference_value) as plain numbers,
- *     matching how they read back via propVal() elsewhere in this project,
- *     but that has not been confirmed against a real write yet. Run one
- *     import in preview-only mode, then Apply on a SMALL statement first,
- *     and check the created record in GHL before trusting this at scale.
  *   - Custom field IDs below (work order / expected tow amount / AAA payment
  *     fields on the Opportunity) are copied from CJ Taylor Towing's real,
  *     already-live AAA-GHL-Extractor tool (import_aaa_payments.py /
@@ -130,7 +133,20 @@
     aaaGrossPaid: ["x6BZnE668LiqEk76S1TW"],
     aaaPayDate: ["2ERL2vncdpLAjD027qXz"],
     aaaPaidTowMiles: ["B3fIEak2zCjLV5Gjcy6U"],
-    aaaPaymentDifference: ["lgDu30kVqm1wJGaCp8o3"],
+    // No fallback ID for this one (2026-09-17): the old field
+    // ("lgDu30kVqm1wJGaCp8o3") was Monetary-typed, and GHL confirmed live
+    // that Monetary fields silently store negative values as positive —
+    // not fixable in place, since GHL doesn't allow changing an existing
+    // field's type. It was deleted and recreated as a Single Line (text)
+    // field of the same name, which stores the sign correctly, so it has
+    // a brand-new ID. Pasting that new ID in here would just go stale
+    // again the next time this field is ever recreated, and (per the
+    // comment above this block) never worked for any other client's
+    // sub-account anyway — so this now relies entirely on the by-name
+    // lookup above. If "Test connection" ever shows this one as
+    // "not found," it means the field's name changed or the token lacks
+    // the Custom Fields scope — not that this fallback needs updating.
+    aaaPaymentDifference: [],
   };
 
   // Candidate GHL field *names* to match, case/whitespace-insensitive, per
@@ -492,12 +508,24 @@
     });
   }
 
+  // GHL's Custom Object API rejects a bare number for a Monetary-typed
+  // property (400 "... is missing a currency code.") — confirmed live
+  // 2026-09-17. It wants the same {currency, value} shape it reads back
+  // as (propVal() in dashboard.js). "default" is the literal currency
+  // code this schema's records actually carry, confirmed from a real
+  // captured aaa_payments record — not an assumed ISO code. null passes
+  // through unwrapped for a row with no expected amount to report.
+  function moneyProp(value) {
+    if (value === null || value === undefined) return null;
+    return { currency: "default", value: value };
+  }
+
   function writeAaaRecord(item) {
     var properties = {
       aaa_payment_id: item.paymentId || null,
       work_order_number: item.wo,
-      gross_paid_amount: item.grossAmount,
-      expected_tow_amount: item.expectedTowAmount,
+      gross_paid_amount: moneyProp(item.grossAmount),
+      expected_tow_amount: moneyProp(item.expectedTowAmount),
       payment_difference_value: item.diff,
       reconciliation_status: item.status,
       exception_reason: item.exceptionReason || null,
@@ -513,7 +541,7 @@
     var properties = {
       aaa_payment_id: pickCol(row, "paymentId") || null,
       work_order_number: wo,
-      gross_paid_amount: parseMoney(pickCol(row, "grossAmount")),
+      gross_paid_amount: moneyProp(parseMoney(pickCol(row, "grossAmount"))),
       expected_tow_amount: null,
       payment_difference_value: null,
       reconciliation_status: "unmatched",
