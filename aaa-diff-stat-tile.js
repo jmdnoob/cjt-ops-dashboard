@@ -152,9 +152,14 @@
   var CSS_TEXT = [
     ':root{--ast-panel:#fff;--ast-border:#e1e5eb;--ast-text:#1a2130;--ast-text-dim:#626b7a;--ast-crit:#b91c1c;--ast-good:#15803d}',
     '#cjt-aaa-stat-root *{box-sizing:border-box}',
-    '#cjt-aaa-stat-root{background:var(--ast-panel);border:1px solid var(--ast-border);border-radius:12px;padding:20px 24px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:360px}',
+    '#cjt-aaa-stat-root{background:var(--ast-panel);border:1px solid var(--ast-border);border-radius:12px;padding:24px 28px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;width:100%}',
     '#cjt-aaa-stat-root .astLabel{font-size:14px;font-weight:600;color:var(--ast-text)}',
-    '#cjt-aaa-stat-root .astNum{font-size:52px;font-weight:600;line-height:1.15;color:var(--ast-text);margin-top:14px;font-variant-numeric:tabular-nums}',
+    // No fixed font-size here — mount()'s fitNumberFont() sets it per-render
+    // so the number always fills one row (bigger when there's room, smaller
+    // only when a longer value genuinely needs it) instead of wrapping.
+    // white-space:nowrap + display:block (a div's default) is what makes
+    // scrollWidth a reliable "how wide does this actually want to be" probe.
+    '#cjt-aaa-stat-root .astNum{font-weight:600;line-height:1.15;color:var(--ast-text);margin-top:14px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}',
     '#cjt-aaa-stat-root .astNum.pos{color:var(--ast-crit)}',
     '#cjt-aaa-stat-root .astNum.neg{color:var(--ast-good)}',
     '#cjt-aaa-stat-root .astCaption{font-size:12.5px;color:var(--ast-text-dim);margin-top:10px;line-height:1.5}',
@@ -170,6 +175,25 @@
     else if (abs >= 1000) out = "$" + (abs / 1000).toFixed(2) + "K";
     else out = "$" + abs.toFixed(2);
     return neg ? "-" + out : out;
+  }
+  window.__CJT_AAA_STAT_INTERNAL__.formatAbbrev = formatAbbrev;
+
+  // Shrinks (or grows) the number's font-size so it always fills exactly
+  // one row, never wraps, and never overflows the tile — starts at MAX_PX
+  // (matched to GHL's own native stat tiles, which run ~110px for a short
+  // value like "$23.78K") and steps down only as far as a given value's
+  // actual width requires. Re-run this any time the number changes OR the
+  // tile's own width changes (the ResizeObserver below) so it stays correct
+  // if GHL's layout around it ever changes.
+  var FIT_MAX_PX = 110;
+  var FIT_MIN_PX = 24;
+  function fitNumberFont(el) {
+    var size = FIT_MAX_PX;
+    el.style.fontSize = size + "px";
+    while (el.scrollWidth > el.clientWidth && size > FIT_MIN_PX) {
+      size -= 2;
+      el.style.fontSize = size + "px";
+    }
   }
 
   function mount() {
@@ -202,6 +226,7 @@
         var r = internal.computeNetDiff(records);
         numEl.textContent = formatAbbrev(r.netDiff);
         numEl.className = "astNum " + (r.netDiff > 0 ? "pos" : r.netDiff < 0 ? "neg" : "");
+        fitNumberFont(numEl);
         var caption = "All-time · " + r.count + " reconciled job(s)";
         if (r.missingExpectedCount > 0) caption += " · " + r.missingExpectedCount + " excluded (no Expected Tow Amount yet)";
         captionEl.className = "astCaption";
@@ -211,6 +236,20 @@
         captionEl.className = "astErr";
         captionEl.textContent = "Couldn't load AAA payment data: " + err.message;
       });
+
+    // Re-fit if the tile's own box ever changes width (a GHL layout change,
+    // the page being resized, a sidebar toggling, etc.) — not just on
+    // window resize, since an iframe's content area can change size
+    // without the window itself firing a resize event.
+    if (window.ResizeObserver) {
+      new ResizeObserver(function () {
+        if (numEl.textContent && numEl.textContent !== "—") fitNumberFont(numEl);
+      }).observe(root);
+    } else {
+      window.addEventListener("resize", function () {
+        if (numEl.textContent && numEl.textContent !== "—") fitNumberFont(numEl);
+      });
+    }
   }
 
   if (document.readyState === "loading") {
