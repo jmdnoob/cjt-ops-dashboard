@@ -65,6 +65,18 @@
  *     equivalent custom fields on their Opportunities, if they even have
  *     them. Re-derive these per client (LIST-GHL-FIELDS-style lookup) rather
  *     than reusing CJ Taylor Towing's IDs.
+ *   - buildWoMap()/findOpportunityByWo() (2026-10-08) find each statement
+ *     row's Opportunity via GET /opportunities/search?q=WO<number> instead
+ *     of paging through every Opportunity in the pipeline (see their own
+ *     comments for why — the old approach hit GHL's rate limit once the
+ *     pipeline passed ~1,500 records). The "q searches name/contact info"
+ *     behavior is confirmed against GHL's documented search parameters and
+ *     the repo's own test suite (repo_test/test_setup.js), but NOT yet
+ *     against a real GHL token with a large, real pipeline. Every match is
+ *     still confirmed against the real Work Order Number field before
+ *     being trusted (a bad/missing search match just shows up as NO MATCH,
+ *     never a silently wrong write) — but run this against a small
+ *     statement first, not a full batch, the first time it's used live.
  * ============================================================================
  */
 (function () {
@@ -461,11 +473,74 @@
     return "";
   }
 
-  // Builds { workOrderNumber -> { id, name, existingPaymentId, expectedTowAmount } }
-  // for every Opportunity in the dispatch pipeline that has a Work Order
-  // Number on file. onProgress(done, total) reports per-opportunity fetch
-  // progress for a UI progress bar.
-  function buildWoMap(onProgress) {
+  // Finds the single Opportunity matching one Work Order Number by
+  // searching GHL for "WO<number>" as text — every Opportunity this system
+  // creates embeds "WO<number>" in its Name (see buildOpportunityName() in
+  // the AAA extractor's native host, and the Towbook historical import's
+  // own Opportunity Name column) — instead of paging through the whole
+  // pipeline. Search's own customFields payload isn't reliably complete
+  // (confirmed, see import_aaa_payments.py's docstring) and a name-text
+  // match alone could coincidentally substring-match a longer/shorter WO
+  // number, so every candidate is still confirmed with a real GET against
+  // its actual Work Order Number field before being trusted. Returns null
+  // if nothing confirms; throws if more than one Opportunity genuinely
+  // carries this same Work Order Number (a real data problem — e.g. a
+  // reused AAA PO — not something to silently pick a winner on).
+  function findOpportunityByWo(pipelineId, woFieldIds, paymentIdFieldIds, expectedFieldIds, wo) {
+    var url = "/opportunities/search?" + qs({
+      location_id: CONFIG.locationId,
+      pipeline_id: pipelineId,
+      status: "all",
+      q: "WO" + wo,
+      limit: 20,
+    });
+    return ghlApi(url, { version: CONFIG.apiVersions.opportunities }).then(function (res) {
+      var candidates = res.opportunities || [];
+      if (candidates.length === 0) return null;
+      return mapWithConcurrency(candidates, 4, function (c) { return getOpportunity(c.id); }).then(function (fullCandidates) {
+        var exact = fullCandidates.filter(function (full) {
+          if (!full) return false;
+          var v = getCustomField(full, woFieldIds);
+          return v && String(v).trim() === wo;
+        });
+        if (exact.length === 0) return null;
+        if (exact.length > 1) {
+          throw new Error(
+            'Work Order Number "' + wo + '" matches ' + exact.length + ' different Opportunities (' +
+            exact.map(function (e) { return e.id; }).join(", ") +
+            ") — this needs to be fixed in GHL (e.g. a reused AAA PO number) before importing."
+          );
+        }
+        var full = exact[0];
+        return {
+          id: full.id,
+          name: full.name,
+          existingPaymentId: getCustomField(full, paymentIdFieldIds),
+          expectedTowAmount: parseMoney(getCustomField(full, expectedFieldIds)),
+        };
+      });
+    });
+  }
+
+  // Builds { workOrderNumber -> { id, name, existingPaymentId,
+  // expectedTowAmount } } for ONLY the Work Order Numbers present in `rows`
+  // — not every Opportunity in the pipeline. This originally fetched and
+  // individually GET-ed every Opportunity in the dispatch pipeline (the
+  // only way to reliably read Work Order Number — see findOpportunityByWo's
+  // comment), which worked fine at a few hundred Opportunities but hit
+  // GHL's rate limit outright once the Towbook backfill pushed the pipeline
+  // past 1,500 records (confirmed live, 2026-10-08), and would only get
+  // slower every month after that as more jobs pile up. Searching per WO
+  // number instead keeps the cost proportional to the size of each
+  // statement being imported, not the pipeline's ever-growing total size.
+  //
+  // Caveat worth knowing: this only finds Opportunities whose Name actually
+  // contains "WO<number>". Every Opportunity this system has ever created
+  // does, but a one-off Opportunity created by hand with a different name
+  // would show up as NO MATCH here even with the right Work Order Number
+  // field set — reported the same as any other non-match below, never
+  // silently dropped.
+  function buildWoMap(rows, onProgress) {
     // Re-resolve every run (cheap — one or two GET calls) rather than trust
     // a stale cache, since the config (and therefore the location) can
     // change between runs in the same page load.
@@ -479,33 +554,25 @@
       var woFieldIds = fieldIdsFor("workOrderNumber");
       var paymentIdFieldIds = fieldIdsFor("aaaPaymentId");
       var expectedFieldIds = fieldIdsFor("expectedTowAmount");
-      return loadAllOpportunities(pipeline.id).then(function (opps) {
-        // Concurrency is now secondary to rateLimitGate() in ghlApi() above
-        // (that's what actually keeps this under GHL's burst limit) - kept
-        // modest here too so a large pipeline doesn't pile up hundreds of
-        // requests queued behind the gate at once.
-        return mapWithConcurrency(
-          opps,
-          4,
-          function (o) { return getOpportunity(o.id); },
-          onProgress
-        ).then(function (fullOpps) {
-          var woMap = {};
-          fullOpps.forEach(function (full) {
-            if (!full) return;
-            var wo = getCustomField(full, woFieldIds);
-            if (!wo) return;
-            wo = String(wo).trim();
-            if (!wo) return;
-            woMap[wo] = {
-              id: full.id,
-              name: full.name,
-              existingPaymentId: getCustomField(full, paymentIdFieldIds),
-              expectedTowAmount: parseMoney(getCustomField(full, expectedFieldIds)),
-            };
-          });
-          return { woMap: woMap, pipelineName: pipeline.name, opportunityCount: opps.length };
+
+      var uniqueWos = [];
+      var seen = {};
+      rows.forEach(function (row) {
+        var wo = pickCol(row, "wo");
+        if (wo && !seen[wo]) { seen[wo] = true; uniqueWos.push(wo); }
+      });
+
+      return mapWithConcurrency(
+        uniqueWos,
+        4,
+        function (wo) { return findOpportunityByWo(pipeline.id, woFieldIds, paymentIdFieldIds, expectedFieldIds, wo); },
+        onProgress
+      ).then(function (results) {
+        var woMap = {};
+        uniqueWos.forEach(function (wo, i) {
+          if (results[i]) woMap[wo] = results[i];
         });
+        return { woMap: woMap, pipelineName: pipeline.name, matchedCount: Object.keys(woMap).length, searchedCount: uniqueWos.length };
       });
     });
   }
@@ -1340,15 +1407,15 @@
       getRowsFromInput()
         .then(function (rows) {
           if (!rows || rows.length === 0) throw new Error("No rows found in the file/pasted text.");
-          setImportProgress(true, 0, 1, "Reading opportunities from GHL…");
-          return buildWoMap(function (done, total) {
-            setImportProgress(true, done, total, "Reading opportunities from GHL… " + done + " / " + total);
+          setImportProgress(true, 0, 1, "Looking up work orders in GHL…");
+          return buildWoMap(rows, function (done, total) {
+            setImportProgress(true, done, total, "Looking up work orders in GHL… " + done + " / " + total);
           }).then(function (info) {
             lastWoMapInfo = info;
             var reconciled = reconcile(rows, info.woMap);
             lastReconciled = reconciled;
             setImportProgress(false, 0, 0, "");
-            showStatus(els.importStatus, "info", "Checked " + rows.length + " row(s) against " + info.opportunityCount + " opportunit" + (info.opportunityCount === 1 ? "y" : "ies") + " in “" + info.pipelineName + "”. Nothing written yet — review below.");
+            showStatus(els.importStatus, "info", "Checked " + rows.length + " row(s) — matched " + info.matchedCount + " of " + info.searchedCount + " distinct Work Order Number(s) in “" + info.pipelineName + "”. Nothing written yet — review below.");
             renderSummary(reconciled);
           });
         })
