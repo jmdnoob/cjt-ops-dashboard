@@ -232,6 +232,8 @@
     });
   }
 
+  var MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
   function computeAggregates(rows) {
     var agg = {
       count: rows.length,
@@ -255,6 +257,57 @@
     return agg;
   }
 
+  // ---------------------------------------------------------------------
+  // CSV export — "export current view": takes exactly the rows and totals
+  // already on screen for whatever Year/Month is selected (the caller
+  // passes in the same filtered rows + aggregates render() just computed),
+  // so the file always matches what's visible, never a separate query.
+  // ---------------------------------------------------------------------
+  function csvEscapeField(v) {
+    var s = v === null || v === undefined ? "" : String(v);
+    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  function sortRowsForDisplay(rows) {
+    return rows.slice().sort(function (a, b) {
+      var ap = a.dateParts, bp = b.dateParts;
+      if (!ap && !bp) return 0;
+      if (!ap) return 1;
+      if (!bp) return -1;
+      return (bp.year - ap.year) || (bp.month - ap.month);
+    });
+  }
+
+  function buildCsv(rows, agg) {
+    var header = ["Work Order", "Payment ID", "Pay Date", "Expected Tow Amount", "Actual Paid", "Difference", "Status"];
+    var lines = [header.map(csvEscapeField).join(",")];
+    sortRowsForDisplay(rows).forEach(function (r) {
+      lines.push([
+        r.wo || "",
+        r.paymentId || "",
+        r.payDate || "",
+        r.expected != null ? r.expected.toFixed(2) : "",
+        r.gross != null ? r.gross.toFixed(2) : "",
+        r.diff != null ? r.diff.toFixed(2) : "",
+        r.status || "",
+      ].map(csvEscapeField).join(","));
+    });
+    lines.push("");
+    lines.push(["Total Expected", "", "", agg.totalExpected.toFixed(2), "", "", ""].map(csvEscapeField).join(","));
+    lines.push(["Total Actual Paid", "", "", "", agg.totalActual.toFixed(2), "", ""].map(csvEscapeField).join(","));
+    lines.push(["Net Difference (Actual − Expected)", "", "", "", "", agg.netDiff.toFixed(2), ""].map(csvEscapeField).join(","));
+    lines.push(["Total Overpaid", "", "", "", "", agg.overpaid.toFixed(2), ""].map(csvEscapeField).join(","));
+    lines.push(["Total Underpaid", "", "", "", "", agg.underpaid.toFixed(2), ""].map(csvEscapeField).join(","));
+    return lines.join("\r\n");
+  }
+
+  function csvFilenameFor(year, month) {
+    var y = year === "all" ? "all-years" : String(year);
+    var m = month === "all" ? "all-months" : (MONTH_NAMES[Number(month) - 1] || month);
+    return "aaa-payment-reconciliation_" + y + "_" + m + ".csv";
+  }
+
   window.__CJT_AAA_DIFF_INTERNAL__ = {
     CONFIG: CONFIG,
     propVal: propVal,
@@ -263,6 +316,9 @@
     distinctYears: distinctYears,
     filterRows: filterRows,
     computeAggregates: computeAggregates,
+    sortRowsForDisplay: sortRowsForDisplay,
+    buildCsv: buildCsv,
+    csvFilenameFor: csvFilenameFor,
     loadAllObjectRecords: loadAllObjectRecords,
   };
 
@@ -334,6 +390,7 @@
       '<select id="adwYear"></select>' +
       '<select id="adwMonth"></select>' +
       '<button type="button" class="btn" id="adwRefresh">Refresh data</button>' +
+      '<button type="button" class="btn" id="adwExport" disabled>Export current view (CSV)</button>' +
       '</div>' +
       '<div class="adwStatus" id="adwStatus">Loading…</div>' +
       '<div id="adwBody" hidden>' +
@@ -350,7 +407,7 @@
       '</div>';
 
     var els = {};
-    ["adwYear", "adwMonth", "adwRefresh", "adwStatus", "adwBody", "adwAsOf", "tExpected", "tActual", "tNet", "tOver", "tUnder", "tCount", "adwNote", "adwTableWrap"]
+    ["adwYear", "adwMonth", "adwRefresh", "adwExport", "adwStatus", "adwBody", "adwAsOf", "tExpected", "tActual", "tNet", "tOver", "tUnder", "tCount", "adwNote", "adwTableWrap"]
       .forEach(function (id) { els[id] = root.querySelector("#" + id); });
 
     var allRows = [];
@@ -372,11 +429,19 @@
       els.adwMonth.value = prevMonth;
     }
 
+    // Set by render() to exactly what's currently on screen, so "Export
+    // current view" never has to re-derive the filter itself — it always
+    // exports precisely what the person is looking at.
+    var lastFiltered = [];
+    var lastAgg = internal.computeAggregates([]);
+
     function render() {
       var year = els.adwYear.value || "all";
       var month = els.adwMonth.value || "all";
       var filtered = internal.filterRows(allRows, year, month);
       var agg = internal.computeAggregates(filtered);
+      lastFiltered = filtered;
+      lastAgg = agg;
 
       els.tExpected.textContent = money(agg.totalExpected);
       els.tActual.textContent = money(agg.totalActual);
@@ -395,13 +460,7 @@
       if (filtered.length === 0) {
         els.adwTableWrap.innerHTML = '<div class="adwEmpty">No reconciled AAA payments in this view.</div>';
       } else {
-        var sorted = filtered.slice().sort(function (a, b) {
-          var ap = a.dateParts, bp = b.dateParts;
-          if (!ap && !bp) return 0;
-          if (!ap) return 1;
-          if (!bp) return -1;
-          return (bp.year - ap.year) || (bp.month - ap.month);
-        });
+        var sorted = internal.sortRowsForDisplay(filtered);
         var body = sorted.map(function (r) {
           var diffClass = r.diff > 0 ? "diffPos" : r.diff < 0 ? "diffNeg" : "";
           return "<tr><td>" + esc(r.wo || "—") + "</td><td>" + esc(r.paymentId || "—") + "</td>" +
@@ -418,6 +477,7 @@
 
     function loadData() {
       els.adwRefresh.disabled = true;
+      els.adwExport.disabled = true;
       els.adwStatus.className = "adwStatus";
       els.adwStatus.textContent = "Loading reconciled AAA payments…";
       els.adwBody.hidden = true;
@@ -435,6 +495,7 @@
           els.adwStatus.textContent = "";
           els.adwAsOf.textContent = "As of " + new Date().toLocaleTimeString();
           els.adwBody.hidden = false;
+          els.adwExport.disabled = false;
         })
         .catch(function (err) {
           els.adwStatus.className = "adwStatus err";
@@ -443,9 +504,30 @@
         .finally(function () { els.adwRefresh.disabled = false; });
     }
 
+    // Downloads exactly what render() last put on screen for the current
+    // Year/Month filter — a client-side Blob + temporary <a download>, no
+    // server round trip, so it works the same way inside a GHL iframe as
+    // every other write-free action in these tools.
+    function downloadCsv(filename, text) {
+      var blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    }
+
     els.adwYear.addEventListener("change", render);
     els.adwMonth.addEventListener("change", render);
     els.adwRefresh.addEventListener("click", loadData);
+    els.adwExport.addEventListener("click", function () {
+      var year = els.adwYear.value || "all";
+      var month = els.adwMonth.value || "all";
+      downloadCsv(internal.csvFilenameFor(year, month), internal.buildCsv(lastFiltered, lastAgg));
+    });
 
     loadData();
   }

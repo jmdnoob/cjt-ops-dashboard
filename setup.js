@@ -77,6 +77,19 @@
  *     being trusted (a bad/missing search match just shows up as NO MATCH,
  *     never a silently wrong write) — but run this against a small
  *     statement first, not a full batch, the first time it's used live.
+ *   - findDuplicateWorkOrders() (2026-10-08) — "6. Find duplicate Work
+ *     Orders" — is a NEW, read-only, full-pipeline scan added after a real
+ *     duplicate was found live: the Towbook historical bulk import (run in
+ *     GHL "Create" mode) created a brand-new Opportunity for a job the
+ *     already-running AAA Work Order Extractor had separately created for
+ *     the same Work Order Number, since the Towbook export's date range ran
+ *     through "today". Exercised against the repo's own test suite
+ *     (repo_test/test_setup.js) but NOT yet against the real, large CJ
+ *     Taylor Towing pipeline — run it there and read the results carefully
+ *     before treating "no duplicates found" as conclusive. Expect it to
+ *     take a few minutes on a pipeline this size — it GETs every
+ *     Opportunity individually, same cost profile as the old pre-2026-10-08
+ *     buildWoMap().
  * ============================================================================
  */
 (function () {
@@ -577,6 +590,70 @@
     });
   }
 
+  // Read-only diagnostic (2026-10-08): scans EVERY Opportunity in the
+  // dispatch pipeline — unlike buildWoMap() above, which only looks up the
+  // specific Work Order Numbers present in one statement — and groups them
+  // by their real Work Order Number field, so any WO number held by more
+  // than one Opportunity shows up. Added after a real duplicate was found
+  // live (two Opportunities both named "WO68157261", one created by the
+  // Towbook historical bulk import and one by the already-running AAA Work
+  // Order Extractor for the same job) — the Towbook import ran in "Create"
+  // mode with no awareness of what the extractor had already created for
+  // Work Order Numbers inside the same date range. This never writes
+  // anything; it only reports what it finds so the duplicates can be
+  // reviewed and cleaned up by hand in GHL.
+  //
+  // Reuses the same rate-limit-safe primitives as the old full-pipeline
+  // buildWoMap() (loadAllOpportunities + per-Opportunity GET via
+  // mapWithConcurrency) — correct but slow on a large pipeline (seconds per
+  // ~25-30 Opportunities at the 70-req/10s pacing in ghlApi, so a few
+  // minutes once the dispatch pipeline is in the thousands) — which is fine
+  // for an occasional manual scan, just don't expect it to be instant.
+  function findDuplicateWorkOrders(onProgress) {
+    return resolveFieldIds().then(function () {
+      return loadPipelines();
+    }).then(function (pipelines) {
+      var pipeline = pipelines.filter(function (p) {
+        return (p.name || "").toLowerCase() === CONFIG.dispatchPipelineName.toLowerCase();
+      })[0];
+      if (!pipeline) throw new Error('No pipeline named "' + CONFIG.dispatchPipelineName + '" found in this GHL location.');
+      var woFieldIds = fieldIdsFor("workOrderNumber");
+      var paymentIdFieldIds = fieldIdsFor("aaaPaymentId");
+
+      return loadAllOpportunities(pipeline.id).then(function (list) {
+        return mapWithConcurrency(list, 4, function (o) { return getOpportunity(o.id); }, onProgress).then(function (fullOpps) {
+          var groups = {};
+          var withWoCount = 0;
+          fullOpps.forEach(function (full) {
+            if (!full) return;
+            var wo = getCustomField(full, woFieldIds);
+            wo = wo ? String(wo).trim() : "";
+            if (!wo) return;
+            withWoCount += 1;
+            if (!groups[wo]) groups[wo] = [];
+            groups[wo].push({
+              id: full.id,
+              name: full.name,
+              updatedAt: full.updatedAt || full.dateUpdated || full.createdAt || null,
+              hasPaymentId: !!getCustomField(full, paymentIdFieldIds),
+              status: full.status || null,
+            });
+          });
+          var duplicateGroups = Object.keys(groups)
+            .filter(function (wo) { return groups[wo].length > 1; })
+            .sort()
+            .map(function (wo) { return { wo: wo, opportunities: groups[wo] }; });
+          return {
+            pipelineName: pipeline.name,
+            totalOpportunities: list.length,
+            withWoCount: withWoCount,
+            duplicateGroups: duplicateGroups,
+          };
+        });
+      });
+    });
+  }
+
   // Reconciles parsed statement rows against a pre-built woMap. Pure
   // function, no network — this is what the preview UI runs, and it's also
   // exactly what the "Apply" step re-derives right before writing, so a
@@ -667,16 +744,46 @@
     return { currency: "default", value: value };
   }
 
+  // Sets properties[key] = {currency, value} ONLY when there's a real value
+  // — the key is left out of `properties` entirely otherwise, it is NEVER
+  // set to a bare `null`. Confirmed live 2026-10-08: sending a literal
+  // `null` for a Monetary-typed property (not just a bare number) gets the
+  // exact same 400 "Expected Tow Amount is missing a currency code." error
+  // as the bare-number case above — GHL's Custom Object API apparently
+  // tries to read a currency code off `null` itself rather than treating it
+  // as "no value." This hit every "no match"/unmatched row on a real import
+  // (they always have no Opportunity to read an Expected Tow Amount from,
+  // so the old code always sent expected_tow_amount: null for them) and
+  // would equally have hit any "exception" row (a matched Opportunity with
+  // no Expected Tow Amount on file yet) — omitting the key is the only
+  // shape GHL accepts for "nothing to report here."
+  function setMoneyProp(properties, key, value) {
+    var m = moneyProp(value);
+    if (m !== null) properties[key] = m;
+  }
+
   function writeAaaRecord(item) {
     var properties = {
       aaa_payment_id: item.paymentId || null,
       work_order_number: item.wo,
-      gross_paid_amount: moneyProp(item.grossAmount),
-      expected_tow_amount: moneyProp(item.expectedTowAmount),
+      // pay_date was missing here entirely until 2026-10-08 — item.payDate
+      // was parsed from the statement and written onto the Opportunity's
+      // "AAA Pay Date" field (see writeOpportunityFields above) but never
+      // onto this aaa_payments record, so every record this ever created
+      // has a blank Pay Date here (confirmed live: a widget reading this
+      // object's pay_date property came back blank for every row, even
+      // though the source statements all had a real Pay Date column).
+      // Fixing this only affects NEW writes going forward — it does NOT
+      // backfill pay_date on records already created before this fix; see
+      // the note in applyReconciliation()'s comment below for what that
+      // takes.
+      pay_date: item.payDate || null,
       payment_difference_value: item.diff,
       reconciliation_status: item.status,
       exception_reason: item.exceptionReason || null,
     };
+    setMoneyProp(properties, "gross_paid_amount", item.grossAmount);
+    setMoneyProp(properties, "expected_tow_amount", item.expectedTowAmount);
     return ghlApi("/objects/" + objectSchemaKey(CONFIG.objectKeys.aaa) + "/records", {
       method: "POST",
       version: CONFIG.apiVersions.objects,
@@ -688,12 +795,15 @@
     var properties = {
       aaa_payment_id: pickCol(row, "paymentId") || null,
       work_order_number: wo,
-      gross_paid_amount: moneyProp(parseMoney(pickCol(row, "grossAmount"))),
-      expected_tow_amount: null,
+      pay_date: pickCol(row, "payDate") || null,
       payment_difference_value: null,
       reconciliation_status: "unmatched",
       exception_reason: "No matching Tow Opportunity for Work Order Number.",
     };
+    setMoneyProp(properties, "gross_paid_amount", parseMoney(pickCol(row, "grossAmount")));
+    // expected_tow_amount deliberately omitted — there's no matched
+    // Opportunity to read one from (see setMoneyProp's comment above for
+    // why this can't be a bare `null` instead).
     return ghlApi("/objects/" + objectSchemaKey(CONFIG.objectKeys.aaa) + "/records", {
       method: "POST",
       version: CONFIG.apiVersions.objects,
@@ -705,6 +815,16 @@
   // both the Opportunity and the aaa_payments object; writes no-match rows
   // only to the aaa_payments object (there's no Opportunity to update);
   // skips noWo and alreadyReconciled entirely, same as the Python tool.
+  //
+  // Backfilling pay_date on records created before the 2026-10-08 fix above:
+  // alreadyReconciled rows are skipped here on purpose (their Payment ID
+  // already matches what's on file, so re-writing them would be a no-op at
+  // best) — which means simply re-importing the same old statements again
+  // will NOT backfill their missing Pay Date, every row will just show up
+  // as "already done" again. Fixing those requires either a small one-off
+  // script that PUTs pay_date onto each existing aaa_payments record from
+  // its original statement data, or accepting that only payments
+  // reconciled from here forward will have a Pay Date on this object.
   function applyReconciliation(reconciled, onProgress) {
     var tasks = [];
     reconciled.toWrite.forEach(function (item) {
@@ -742,6 +862,42 @@
   // SheetJS from jsDelivr — only fetched if a client actually picks an
   // .xlsx file, since most won't need it).
   // ---------------------------------------------------------------------
+
+  // AAA's own "Pay Statements" export is a Salesforce report, which ships
+  // several title/filter-criteria rows before the real header row (e.g.
+  // "Pay Statements", "As of <date>... Generated by...", "Filtered By",
+  // "Status equals Payment Processed", ...) — confirmed live, 2026-10-08:
+  // assuming row 1 is always the header (the old behavior here) silently
+  // treated one of those junk rows as the header instead, so not a single
+  // real column (Work Order Number, Payment ID, etc.) ever matched and
+  // every row fell into "NO WO #" with zero rows actually reconciled.
+  //
+  // Scans the first few rows of raw cell data (array-of-arrays — row index
+  // must stay aligned with the real sheet/line position, so callers must
+  // NOT pre-filter blank rows before calling this) for the one that
+  // actually looks like statement headers — matches at least 2 of our
+  // known column names (COLUMN_ALIASES, case/whitespace-insensitive) —
+  // instead of assuming row 0. Falls back to row 0 (the original behavior)
+  // if nothing scores, so an already-clean CSV/statement with no report
+  // chrome above its header row (true for row 0 itself, which already
+  // matches >=2 aliases) is completely unaffected.
+  function findStatementHeaderRowIndex(rowsOfCells) {
+    var allAliases = [];
+    Object.keys(COLUMN_ALIASES).forEach(function (k) {
+      allAliases = allAliases.concat(COLUMN_ALIASES[k]);
+    });
+    var scanLimit = Math.min(rowsOfCells.length, 30);
+    for (var r = 0; r < scanLimit; r++) {
+      var cells = (rowsOfCells[r] || []).map(function (c) { return normalizeHeader(c); });
+      var hits = 0;
+      allAliases.forEach(function (alias) {
+        if (cells.indexOf(alias) !== -1) hits += 1;
+      });
+      if (hits >= 2) return r;
+    }
+    return 0;
+  }
+
   function parseCsvText(text) {
     // Minimal RFC4180 parser: handles quoted fields, embedded commas,
     // escaped quotes (""), and \r\n or \n line endings.
@@ -769,13 +925,20 @@
       field += c; i += 1;
     }
     if (field.length > 0 || row.length > 0) pushRow();
-    rows = rows.filter(function (r) { return !(r.length === 1 && r[0] === ""); });
+    // Trim fully-blank trailing/leading lines, but keep every other row's
+    // position intact — findStatementHeaderRowIndex needs real row indices,
+    // not a pre-filtered list, to find the header wherever it actually is.
+    while (rows.length && rows[0].length === 1 && rows[0][0] === "") rows.shift();
+    while (rows.length && rows[rows.length - 1].length === 1 && rows[rows.length - 1][0] === "") rows.pop();
     if (rows.length === 0) return [];
-    var headers = rows[0];
-    return rows.slice(1).map(function (r) {
+    var headerIdx = findStatementHeaderRowIndex(rows);
+    var headers = rows[headerIdx];
+    return rows.slice(headerIdx + 1).map(function (r) {
       var obj = {};
       headers.forEach(function (h, idx) { obj[h] = r[idx] !== undefined ? r[idx] : ""; });
       return obj;
+    }).filter(function (obj) {
+      return Object.keys(obj).some(function (k) { return String(obj[k]).trim() !== ""; });
     });
   }
 
@@ -797,7 +960,18 @@
     return ensureXlsxLib().then(function (XLSX) {
       var wb = XLSX.read(buf, { type: "array" });
       var sheet = wb.Sheets[wb.SheetNames[0]];
-      return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+      // header: 1 → raw array-of-arrays, one entry per actual sheet row, so
+      // row indices line up with the real sheet (needed by
+      // findStatementHeaderRowIndex — see its own comment for why row 0
+      // can't just be assumed to be the header).
+      var raw = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+      var headerIdx = findStatementHeaderRowIndex(raw);
+      // range as a bare number = "start at this 0-indexed row" (SheetJS),
+      // which both treats that row as the header and skips everything
+      // above it.
+      return XLSX.utils.sheet_to_json(sheet, { defval: "", range: headerIdx }).filter(function (obj) {
+        return Object.keys(obj).some(function (k) { return String(obj[k]).trim() !== ""; });
+      });
     });
   }
 
@@ -838,6 +1012,7 @@
     parseXlsxArrayBuffer: parseXlsxArrayBuffer,
     pickCol: pickCol,
     buildWoMap: buildWoMap,
+    findDuplicateWorkOrders: findDuplicateWorkOrders,
     reconcile: reconcile,
     applyReconciliation: applyReconciliation,
     sha256Hex: sha256Hex,
@@ -1000,7 +1175,15 @@
     '<div id="applyWrap"></div>' +
     '</div>' +
 
-    '<div class="card" id="cardExtension"><h2>6. AAA Work Order Extractor (browser extension)</h2>' +
+    '<div class="card" id="cardDupes"><h2>6. Find duplicate Work Orders</h2>' +
+    '<div class="cardDesc">Scans every Opportunity in the dispatch pipeline and groups them by their real Work Order Number field, so any WO number held by more than one Opportunity card shows up — e.g. one created by the Towbook historical import and a separate one created independently by the live AAA Work Order Extractor for the same job. Read-only: this only looks, it never writes or deletes anything in GHL. A full scan reads every Opportunity individually, so it can take a few minutes on a large pipeline.</div>' +
+    '<div class="btnRow"><button type="button" class="btn primary" id="btnScanDupes">Scan for duplicates</button></div>' +
+    '<div class="progressWrap" id="dupeProgress"><div class="progressBar"><div id="dupeProgressBar"></div></div><div class="progressLabel" id="dupeProgressLabel"></div></div>' +
+    '<div class="statusMsg" id="dupeStatus"></div>' +
+    '<div id="dupeResultsWrap"></div>' +
+    '</div>' +
+
+    '<div class="card" id="cardExtension"><h2>7. AAA Work Order Extractor (browser extension)</h2>' +
     '<div class="cardDesc">The dispatcher-side companion tool: it reads an AAA work order page and can sync it straight into this pipeline. It runs entirely on the dispatcher\'s own computer — no GHL token is ever stored in the extension itself. Download it, unzip it, and run the installer once per computer that needs it.</div>' +
     '<div id="extDownloadWrap"></div>' +
     '</div>' +
@@ -1136,6 +1319,7 @@
      "btnGenerate", "snippetOut", "btnCopySnippet", "snippetStatus",
      "fFile", "togglePaste", "pasteWrap", "fPaste", "btnPreview",
      "importProgress", "importProgressBar", "importProgressLabel", "importStatus", "importSummary", "importTableWrap", "applyWrap",
+     "btnScanDupes", "dupeProgress", "dupeProgressBar", "dupeProgressLabel", "dupeStatus", "dupeResultsWrap",
      "extDownloadWrap"
     ].forEach(function (id) { els[id] = root.querySelector("#" + id); });
 
@@ -1426,7 +1610,67 @@
         .finally(function () { els.btnPreview.disabled = false; });
     });
 
-    // ---- 6. Extension download (GitHub Releases, OS-detected) ----
+    // ---- 6. Find duplicate Work Orders (read-only) ----
+    var lastDupeResult = null;
+
+    function setDupeProgress(shown, done, total, label) {
+      els.dupeProgress.className = "progressWrap" + (shown ? " show" : "");
+      if (total) els.dupeProgressBar.style.width = Math.round((done / total) * 100) + "%";
+      els.dupeProgressLabel.textContent = label || (total ? done + " / " + total : "");
+    }
+
+    function renderDupeResults(result) {
+      if (!result.duplicateGroups.length) {
+        els.dupeResultsWrap.innerHTML = "";
+        return;
+      }
+      var body = result.duplicateGroups.map(function (g) {
+        return g.opportunities.map(function (o) {
+          return "<tr><td>" + esc(g.wo) + "</td><td>" + esc(o.name || "—") + "</td>" +
+            "<td class=\"mono\">" + esc(o.id) + "</td>" +
+            "<td>" + (o.updatedAt ? esc(String(o.updatedAt)) : "—") + "</td>" +
+            "<td>" + (o.hasPaymentId ? "Yes" : "No") + "</td></tr>";
+        }).join("");
+      }).join("");
+      els.dupeResultsWrap.innerHTML =
+        '<div class="tableWrap"><table><thead><tr><th>Work Order</th><th>Opportunity Name</th><th>Opportunity ID</th><th>Last Updated</th><th>Has AAA Payment ID?</th></tr></thead><tbody>' +
+        body + "</tbody></table></div>" +
+        '<div class="hint" style="margin-top:8px;">Each row is a separate Opportunity card in GHL for the same Work Order Number. For each one: open both cards in GHL (search the Work Order Number), decide which to keep — usually whichever one already has an AAA Payment ID, or has more fields filled in (Assigned Driver, Destination Address) — then move anything useful from the other onto it and delete the other by hand in GHL. This scan only finds and lists them; it never deletes or merges anything itself.</div>';
+    }
+
+    els.btnScanDupes.addEventListener("click", function () {
+      Object.assign(CONFIG, liveConfigFromForm());
+      if (!CONFIG.locationId || !CONFIG.privateToken) {
+        showStatus(els.dupeStatus, "err", "Set up the connection (section 1) and test it before scanning.");
+        return;
+      }
+      hideStatus(els.dupeStatus);
+      els.dupeResultsWrap.innerHTML = "";
+      els.btnScanDupes.disabled = true;
+      setDupeProgress(true, 0, 1, "Scanning the dispatch pipeline — this reads every Opportunity individually and can take a few minutes on a large pipeline…");
+
+      findDuplicateWorkOrders(function (done, total) {
+        setDupeProgress(true, done, total, "Scanning… " + done + " / " + total);
+      })
+        .then(function (result) {
+          lastDupeResult = result;
+          setDupeProgress(false, 0, 0, "");
+          if (result.duplicateGroups.length === 0) {
+            showStatus(els.dupeStatus, "ok", "Scanned " + result.totalOpportunities + " Opportunities in “" + result.pipelineName + "” (" + result.withWoCount + " with a Work Order Number) — no duplicates found.");
+          } else {
+            var dupOppCount = result.duplicateGroups.reduce(function (n, g) { return n + g.opportunities.length; }, 0);
+            showStatus(els.dupeStatus, "err", "Scanned " + result.totalOpportunities + " Opportunities — found " + result.duplicateGroups.length + " Work Order Number(s) with more than one Opportunity card (" + dupOppCount + " Opportunities total). Review below before importing or applying more payment statements for these.");
+          }
+          renderDupeResults(result);
+        })
+        .catch(function (err) {
+          setDupeProgress(false, 0, 0, "");
+          showStatus(els.dupeStatus, "err", "Scan failed: " + err.message);
+        })
+        .finally(function () { els.btnScanDupes.disabled = false; });
+    });
+
+    // ---- 7. Extension download (GitHub Releases, OS-detected) ----
     // A webpage can never install or run software on a visitor's computer
     // by itself — this only gets them the right zip with one click. The
     // actual install (unzip + run the .command/.exe installer) still
