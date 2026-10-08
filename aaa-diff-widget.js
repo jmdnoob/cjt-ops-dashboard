@@ -11,10 +11,22 @@
  * This widget sidesteps both problems: it reads straight off the
  * "aaa_payments" custom object (which has real Number-typed
  * expected_tow_amount / gross_paid_amount), computes Actual − Expected
- * itself in the browser, and recomputes instantly whenever you change the
- * Year/Month filters — no refetch needed, since everything is pulled once
- * and filtered/summed client-side. "Refresh data" re-pulls from GHL if new
- * reconciliations have happened since the page loaded.
+ * itself in the browser, and recomputes instantly on "Refresh data" — no
+ * server round trip, just a re-pull + re-sum client-side.
+ *
+ * Year/Month filtering (2026-10-08): REMOVED for now, not just hidden. It
+ * depended entirely on each record's pay_date, and setup.js's Apply step
+ * never actually wrote pay_date onto these records until just now (see its
+ * own 2026-10-08 comment on writeAaaRecord/writeUnmatchedAaaRecord) — so
+ * every record created before that fix has no usable date, which made a
+ * date filter actively misleading (it would silently exclude most or all
+ * of your real data instead of showing it). The Pay Date column is gone
+ * from the table for the same reason. The underlying pure functions
+ * (parsePayDateParts, distinctYears, filterRows) are still here and still
+ * tested — re-enabling the Year/Month UI is a small, contained change once
+ * pay_date is reliably populated (either from new reconciliations going
+ * forward under the fixed setup.js, or a one-off backfill of older
+ * records).
  *
  * ============================================================================
  * WHAT TO PASTE INTO GHL (Website/Funnel builder -> Custom HTML/CSS/JS
@@ -37,14 +49,6 @@
  *
  * IMPORTANT: use "@main" here, not "@latest" — see the same note at the top
  * of setup.js/dashboard.js for why "@latest" is a trap on this repo.
- *
- * UNVERIFIED — confirm against a real token before relying on this in front
- * of a client: the Pay Date parsing below handles the two date shapes seen
- * in this project's real data ("YYYY-MM-DD" and "M/D/YYYY"), falling back to
- * the browser's own Date parser for anything else — a pay_date written in
- * some other format will fall into "No pay date" (excluded whenever a
- * specific Year/Month is selected, called out in its own tile so it's never
- * silently dropped) rather than being miscategorized.
  * ============================================================================
  */
 (function () {
@@ -269,24 +273,23 @@
     return s;
   }
 
+  // Sorts by Work Order Number (ascending, numeric-aware so "9" sorts
+  // before "10") rather than by date — pay_date isn't reliably populated
+  // yet (see the 2026-10-08 note at the top of this file), so a date sort
+  // would mostly just reflect fetch order, not anything real.
   function sortRowsForDisplay(rows) {
     return rows.slice().sort(function (a, b) {
-      var ap = a.dateParts, bp = b.dateParts;
-      if (!ap && !bp) return 0;
-      if (!ap) return 1;
-      if (!bp) return -1;
-      return (bp.year - ap.year) || (bp.month - ap.month);
+      return String(a.wo || "").localeCompare(String(b.wo || ""), undefined, { numeric: true });
     });
   }
 
   function buildCsv(rows, agg) {
-    var header = ["Work Order", "Payment ID", "Pay Date", "Expected Tow Amount", "Actual Paid", "Difference", "Status"];
+    var header = ["Work Order", "Payment ID", "Expected Tow Amount", "Actual Paid", "Difference", "Status"];
     var lines = [header.map(csvEscapeField).join(",")];
     sortRowsForDisplay(rows).forEach(function (r) {
       lines.push([
         r.wo || "",
         r.paymentId || "",
-        r.payDate || "",
         r.expected != null ? r.expected.toFixed(2) : "",
         r.gross != null ? r.gross.toFixed(2) : "",
         r.diff != null ? r.diff.toFixed(2) : "",
@@ -294,18 +297,18 @@
       ].map(csvEscapeField).join(","));
     });
     lines.push("");
-    lines.push(["Total Expected", "", "", agg.totalExpected.toFixed(2), "", "", ""].map(csvEscapeField).join(","));
-    lines.push(["Total Actual Paid", "", "", "", agg.totalActual.toFixed(2), "", ""].map(csvEscapeField).join(","));
-    lines.push(["Net Difference (Actual − Expected)", "", "", "", "", agg.netDiff.toFixed(2), ""].map(csvEscapeField).join(","));
-    lines.push(["Total Overpaid", "", "", "", "", agg.overpaid.toFixed(2), ""].map(csvEscapeField).join(","));
-    lines.push(["Total Underpaid", "", "", "", "", agg.underpaid.toFixed(2), ""].map(csvEscapeField).join(","));
+    lines.push(["Total Expected", "", agg.totalExpected.toFixed(2), "", "", ""].map(csvEscapeField).join(","));
+    lines.push(["Total Actual Paid", "", "", agg.totalActual.toFixed(2), "", ""].map(csvEscapeField).join(","));
+    lines.push(["Net Difference (Actual − Expected)", "", "", "", agg.netDiff.toFixed(2), ""].map(csvEscapeField).join(","));
+    lines.push(["Total Overpaid", "", "", "", agg.overpaid.toFixed(2), ""].map(csvEscapeField).join(","));
+    lines.push(["Total Underpaid", "", "", "", agg.underpaid.toFixed(2), ""].map(csvEscapeField).join(","));
     return lines.join("\r\n");
   }
 
-  function csvFilenameFor(year, month) {
-    var y = year === "all" ? "all-years" : String(year);
-    var m = month === "all" ? "all-months" : (MONTH_NAMES[Number(month) - 1] || month);
-    return "aaa-payment-reconciliation_" + y + "_" + m + ".csv";
+  function csvFilenameFor() {
+    var d = new Date();
+    var pad = function (n) { return n < 10 ? "0" + n : String(n); };
+    return "aaa-payment-reconciliation_" + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + ".csv";
   }
 
   window.__CJT_AAA_DIFF_INTERNAL__ = {
@@ -360,8 +363,6 @@
     '#cjt-aaa-diff-root .adwEmpty{padding:18px;text-align:center;color:var(--adw-text-dim);font-size:13px}'
   ].join("\n");
 
-  var MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
   function esc(s) {
     return String(s === undefined || s === null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -387,8 +388,6 @@
     root.innerHTML =
       '<div class="adwTop"><h2>AAA Payment Reconciliation</h2><span class="adwAsOf" id="adwAsOf"></span></div>' +
       '<div class="adwFilters">' +
-      '<select id="adwYear"></select>' +
-      '<select id="adwMonth"></select>' +
       '<button type="button" class="btn" id="adwRefresh">Refresh data</button>' +
       '<button type="button" class="btn" id="adwExport" disabled>Export current view (CSV)</button>' +
       '</div>' +
@@ -407,27 +406,11 @@
       '</div>';
 
     var els = {};
-    ["adwYear", "adwMonth", "adwRefresh", "adwExport", "adwStatus", "adwBody", "adwAsOf", "tExpected", "tActual", "tNet", "tOver", "tUnder", "tCount", "adwNote", "adwTableWrap"]
+    ["adwRefresh", "adwExport", "adwStatus", "adwBody", "adwAsOf", "tExpected", "tActual", "tNet", "tOver", "tUnder", "tCount", "adwNote", "adwTableWrap"]
       .forEach(function (id) { els[id] = root.querySelector("#" + id); });
 
     var allRows = [];
     var internal = window.__CJT_AAA_DIFF_INTERNAL__;
-
-    function populateFilters() {
-      var years = internal.distinctYears(allRows);
-      var currentYear = new Date().getFullYear();
-      var defaultYear = years.indexOf(currentYear) !== -1 ? String(currentYear) : "all";
-      var prevYear = els.adwYear.value || defaultYear;
-      var prevMonth = els.adwMonth.value || "all";
-
-      els.adwYear.innerHTML = '<option value="all">All years</option>' +
-        years.map(function (y) { return '<option value="' + y + '">' + y + "</option>"; }).join("");
-      els.adwMonth.innerHTML = '<option value="all">All months</option>' +
-        MONTH_NAMES.map(function (m, i) { return '<option value="' + (i + 1) + '">' + m + "</option>"; }).join("");
-
-      els.adwYear.value = years.indexOf(Number(prevYear)) !== -1 || prevYear === "all" ? prevYear : defaultYear;
-      els.adwMonth.value = prevMonth;
-    }
 
     // Set by render() to exactly what's currently on screen, so "Export
     // current view" never has to re-derive the filter itself — it always
@@ -435,10 +418,10 @@
     var lastFiltered = [];
     var lastAgg = internal.computeAggregates([]);
 
+    // Always "all" now — see the 2026-10-08 note at the top of this file
+    // for why date filtering was pulled rather than left broken.
     function render() {
-      var year = els.adwYear.value || "all";
-      var month = els.adwMonth.value || "all";
-      var filtered = internal.filterRows(allRows, year, month);
+      var filtered = allRows.slice();
       var agg = internal.computeAggregates(filtered);
       lastFiltered = filtered;
       lastAgg = agg;
@@ -451,26 +434,23 @@
       els.tUnder.textContent = money(agg.underpaid);
       els.tCount.textContent = String(agg.count);
 
-      var noDateCount = allRows.filter(function (r) { return !r.dateParts; }).length;
-      var notes = [];
-      if (agg.noExpectedCount > 0) notes.push(agg.noExpectedCount + " job(s) in view have no Expected Tow Amount on file yet (excluded from Expected/Net totals).");
-      if ((year !== "all" || month !== "all") && noDateCount > 0) notes.push(noDateCount + " record(s) across all time have no readable Pay Date and are excluded whenever a Year or Month filter is applied — switch both to “All” to include them.");
-      els.adwNote.textContent = notes.join(" ");
+      els.adwNote.textContent = agg.noExpectedCount > 0
+        ? (agg.noExpectedCount + " job(s) in view have no Expected Tow Amount on file yet (excluded from Expected/Net totals).")
+        : "";
 
       if (filtered.length === 0) {
-        els.adwTableWrap.innerHTML = '<div class="adwEmpty">No reconciled AAA payments in this view.</div>';
+        els.adwTableWrap.innerHTML = '<div class="adwEmpty">No reconciled AAA payments yet.</div>';
       } else {
         var sorted = internal.sortRowsForDisplay(filtered);
         var body = sorted.map(function (r) {
           var diffClass = r.diff > 0 ? "diffPos" : r.diff < 0 ? "diffNeg" : "";
           return "<tr><td>" + esc(r.wo || "—") + "</td><td>" + esc(r.paymentId || "—") + "</td>" +
-            "<td>" + esc(r.payDate || "—") + "</td>" +
             "<td>" + money(r.expected) + "</td><td>" + money(r.gross) + "</td>" +
             '<td class="' + diffClass + '">' + money(r.diff) + "</td>" +
             "<td>" + esc(r.status || "—") + "</td></tr>";
         }).join("");
         els.adwTableWrap.innerHTML =
-          '<div class="tableWrap"><table><thead><tr><th>Work Order</th><th>Payment ID</th><th>Pay Date</th><th>Expected</th><th>Actual Paid</th><th>Difference</th><th>Status</th></tr></thead><tbody>' +
+          '<div class="tableWrap"><table><thead><tr><th>Work Order</th><th>Payment ID</th><th>Expected</th><th>Actual Paid</th><th>Difference</th><th>Status</th></tr></thead><tbody>' +
           body + "</tbody></table></div>";
       }
     }
@@ -490,7 +470,6 @@
       internal.loadAllObjectRecords(CONFIG.objectKeys.aaa)
         .then(function (records) {
           allRows = records.map(internal.mapRecord);
-          populateFilters();
           render();
           els.adwStatus.textContent = "";
           els.adwAsOf.textContent = "As of " + new Date().toLocaleTimeString();
@@ -504,10 +483,10 @@
         .finally(function () { els.adwRefresh.disabled = false; });
     }
 
-    // Downloads exactly what render() last put on screen for the current
-    // Year/Month filter — a client-side Blob + temporary <a download>, no
-    // server round trip, so it works the same way inside a GHL iframe as
-    // every other write-free action in these tools.
+    // Downloads exactly what render() last put on screen — a client-side
+    // Blob + temporary <a download>, no server round trip, so it works the
+    // same way inside a GHL iframe as every other write-free action in
+    // these tools.
     function downloadCsv(filename, text) {
       var blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
       var url = URL.createObjectURL(blob);
@@ -520,13 +499,9 @@
       setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     }
 
-    els.adwYear.addEventListener("change", render);
-    els.adwMonth.addEventListener("change", render);
     els.adwRefresh.addEventListener("click", loadData);
     els.adwExport.addEventListener("click", function () {
-      var year = els.adwYear.value || "all";
-      var month = els.adwMonth.value || "all";
-      downloadCsv(internal.csvFilenameFor(year, month), internal.buildCsv(lastFiltered, lastAgg));
+      downloadCsv(internal.csvFilenameFor(), internal.buildCsv(lastFiltered, lastAgg));
     });
 
     loadData();
