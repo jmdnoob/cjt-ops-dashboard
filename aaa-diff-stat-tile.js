@@ -152,14 +152,20 @@
   var CSS_TEXT = [
     ':root{--ast-panel:#fff;--ast-border:#e1e5eb;--ast-text:#1a2130;--ast-text-dim:#626b7a;--ast-crit:#b91c1c;--ast-good:#15803d}',
     '#cjt-aaa-stat-root *{box-sizing:border-box}',
-    '#cjt-aaa-stat-root{background:var(--ast-panel);border:1px solid var(--ast-border);border-radius:12px;padding:24px 28px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;width:100%}',
+    // container-type:inline-size turns this element into a CSS "query
+    // container" so the cqw units below are a live percentage of ITS actual
+    // rendered width, recalculated continuously by the browser's layout
+    // engine — not a one-shot JS measurement that can run before GHL's
+    // embed has finished sizing the surrounding card/iframe.
+    '#cjt-aaa-stat-root{background:var(--ast-panel);border:1px solid var(--ast-border);border-radius:12px;padding:24px 28px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;width:100%;container-type:inline-size}',
     '#cjt-aaa-stat-root .astLabel{font-size:14px;font-weight:600;color:var(--ast-text)}',
-    // No fixed font-size here — mount()'s fitNumberFont() sets it per-render
-    // so the number always fills one row (bigger when there's room, smaller
-    // only when a longer value genuinely needs it) instead of wrapping.
-    // white-space:nowrap + display:block (a div's default) is what makes
-    // scrollWidth a reliable "how wide does this actually want to be" probe.
-    '#cjt-aaa-stat-root .astNum{font-weight:600;line-height:1.15;color:var(--ast-text);margin-top:14px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}',
+    // This clamp() is the baseline size — pure CSS, works even with
+    // JavaScript disabled/blocked, and is what GHL's own native tiles are
+    // visually matched to (a short value like "$23.78K" sits near the
+    // 128px ceiling on a normal-width tile). mount()'s fitNumberFont() only
+    // trims this further, and only for a value long enough to actually
+    // overflow — it never has to do the initial "make it big" work anymore.
+    '#cjt-aaa-stat-root .astNum{font-weight:600;line-height:1.15;color:var(--ast-text);margin-top:14px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;font-size:clamp(40px,18cqw,128px)}',
     '#cjt-aaa-stat-root .astNum.pos{color:var(--ast-crit)}',
     '#cjt-aaa-stat-root .astNum.neg{color:var(--ast-good)}',
     '#cjt-aaa-stat-root .astCaption{font-size:12.5px;color:var(--ast-text-dim);margin-top:10px;line-height:1.5}',
@@ -178,18 +184,26 @@
   }
   window.__CJT_AAA_STAT_INTERNAL__.formatAbbrev = formatAbbrev;
 
-  // Shrinks (or grows) the number's font-size so it always fills exactly
-  // one row, never wraps, and never overflows the tile — starts at MAX_PX
-  // (matched to GHL's own native stat tiles, which run ~110px for a short
-  // value like "$23.78K") and steps down only as far as a given value's
-  // actual width requires. Re-run this any time the number changes OR the
-  // tile's own width changes (the ResizeObserver below) so it stays correct
-  // if GHL's layout around it ever changes.
-  var FIT_MAX_PX = 110;
+  // The CSS clamp(40px, 18cqw, 128px) on .astNum is the baseline size and
+  // does the "make it big" work on its own, continuously, with no JS
+  // involved. This function's only job now is to trim that baseline
+  // further for a value long enough to actually overflow the tile (e.g. a
+  // big "$123,456.78" style number) — it never forces the size up, so it
+  // can't fight the CSS or lock in a too-small result the way a
+  // reset-every-call measurement loop could.
   var FIT_MIN_PX = 24;
   function fitNumberFont(el) {
-    var size = FIT_MAX_PX;
-    el.style.fontSize = size + "px";
+    // Always start back at the CSS baseline, not the previous (possibly
+    // already-shrunk) inline size — otherwise a shrink from a long value
+    // would never grow back when a later value is shorter.
+    el.style.fontSize = "";
+    // clientWidth is 0 before the element has a real box (not yet attached,
+    // a parent still collapsed, etc). Measuring against 0 would shrink the
+    // font to the floor for no reason, so skip — the CSS baseline stays in
+    // effect and the ResizeObserver/caller below retries once there's a
+    // real width to check against.
+    if (el.clientWidth < 10) return;
+    var size = parseFloat(getComputedStyle(el).fontSize);
     while (el.scrollWidth > el.clientWidth && size > FIT_MIN_PX) {
       size -= 2;
       el.style.fontSize = size + "px";
@@ -221,12 +235,24 @@
       return;
     }
 
+    // Double rAF = "wait until the browser has actually painted a layout",
+    // which is what makes el.clientWidth trustworthy inside fitNumberFont().
+    // A single rAF can still fire before GHL's own embed/iframe has finished
+    // sizing itself; two in a row reliably lands after that.
+    function scheduleFit() {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          if (numEl.textContent && numEl.textContent !== "—") fitNumberFont(numEl);
+        });
+      });
+    }
+
     internal.loadAllObjectRecords(CONFIG.objectKeys.aaa)
       .then(function (records) {
         var r = internal.computeNetDiff(records);
         numEl.textContent = formatAbbrev(r.netDiff);
         numEl.className = "astNum " + (r.netDiff > 0 ? "pos" : r.netDiff < 0 ? "neg" : "");
-        fitNumberFont(numEl);
+        scheduleFit();
         var caption = "All-time · " + r.count + " reconciled job(s)";
         if (r.missingExpectedCount > 0) caption += " · " + r.missingExpectedCount + " excluded (no Expected Tow Amount yet)";
         captionEl.className = "astCaption";
@@ -236,6 +262,11 @@
         captionEl.className = "astErr";
         captionEl.textContent = "Couldn't load AAA payment data: " + err.message;
       });
+
+    // Extra safety net: GHL's page can still reflow after our data loads
+    // (late web fonts, other widgets finishing, a sidebar collapsing), so
+    // re-check once more on full page load.
+    window.addEventListener("load", scheduleFit);
 
     // Re-fit if the tile's own box ever changes width (a GHL layout change,
     // the page being resized, a sidebar toggling, etc.) — not just on
