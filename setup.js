@@ -239,8 +239,50 @@
   }
 
   // ---------------------------------------------------------------------
-  // GHL API client (identical to dashboard.js)
+  // GHL API client (identical to dashboard.js), with built-in rate-limit
+  // pacing + 429 retry/backoff.
+  //
+  // GHL's documented limit (marketplace.gohighlevel.com/docs/other/rate-
+  // limits) is a burst of 100 requests per rolling 10s window per location
+  // (plus a 200,000/day cap). buildWoMap() below fires one GET per
+  // Opportunity in the dispatch pipeline (required - see its own comment),
+  // and once Towbook's historical jobs are imported that pipeline jumps to
+  // 1,500+ records, which blew straight through the burst limit with no
+  // pacing at all (confirmed live, 2026-10-08: "GHL API 429 /opportunities/
+  // ...: Too Many Requests" partway through a statement-import Preview).
+  //
+  // Fix is two parts: (1) rateLimitGate() below paces outgoing requests to
+  // a conservative 70/10s - under the documented 100/10s so there's
+  // headroom left for another staff member's dashboard tab hitting the same
+  // location at the same time: GHL's limit is per location, not per tab/
+  // token; (2) any 429 that still gets through anyway (e.g. from that other
+  // concurrent usage) is retried with exponential backoff (honoring a
+  // Retry-After header if GHL sends one) instead of failing the whole
+  // import/preview outright.
   // ---------------------------------------------------------------------
+  var RATE_LIMIT_WINDOW_MS = 10000;
+  var RATE_LIMIT_MAX_PER_WINDOW = 70;
+  var requestTimestamps = [];
+
+  function sleep(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  // Sliding-window gate: blocks (via a delayed retry) until there's room
+  // under RATE_LIMIT_MAX_PER_WINDOW within the trailing RATE_LIMIT_WINDOW_MS,
+  // then reserves a slot and lets the call through.
+  function rateLimitGate() {
+    var now = Date.now();
+    requestTimestamps = requestTimestamps.filter(function (t) { return now - t < RATE_LIMIT_WINDOW_MS; });
+    if (requestTimestamps.length < RATE_LIMIT_MAX_PER_WINDOW) {
+      requestTimestamps.push(now);
+      return Promise.resolve();
+    }
+    var oldest = requestTimestamps[0];
+    var waitMs = RATE_LIMIT_WINDOW_MS - (now - oldest) + 25;
+    return sleep(waitMs).then(rateLimitGate);
+  }
+
   function ghlApi(path, opts) {
     opts = opts || {};
     var headers = {
@@ -248,18 +290,38 @@
       Version: opts.version || CONFIG.apiVersions.objects,
     };
     if (opts.body) headers["Content-Type"] = "application/json";
-    return fetch(CONFIG.apiBase + path, {
-      method: opts.method || "GET",
-      headers: headers,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-    }).then(function (res) {
-      if (!res.ok) {
-        return res.text().then(function (t) {
-          throw new Error("GHL API " + res.status + " " + path + ": " + t.slice(0, 300));
+    var maxRetries = 5;
+
+    function attempt(retryCount) {
+      return rateLimitGate().then(function () {
+        return fetch(CONFIG.apiBase + path, {
+          method: opts.method || "GET",
+          headers: headers,
+          body: opts.body ? JSON.stringify(opts.body) : undefined,
         });
-      }
-      return res.json();
-    });
+      }).then(function (res) {
+        if (res.status === 429) {
+          if (retryCount >= maxRetries) {
+            return res.text().then(function (t) {
+              throw new Error("GHL API 429 " + path + " (still rate-limited after " + maxRetries + " retries): " + t.slice(0, 300));
+            });
+          }
+          var retryAfterHeader = res.headers && res.headers.get && res.headers.get("Retry-After");
+          var retryAfterMs = retryAfterHeader ? parseFloat(retryAfterHeader) * 1000 : NaN;
+          var waitMs = isNaN(retryAfterMs) ? Math.min(1000 * Math.pow(2, retryCount), 15000) : retryAfterMs;
+          waitMs += Math.floor(Math.random() * 300); // jitter so parallel callers don't retry in lockstep
+          return sleep(waitMs).then(function () { return attempt(retryCount + 1); });
+        }
+        if (!res.ok) {
+          return res.text().then(function (t) {
+            throw new Error("GHL API " + res.status + " " + path + ": " + t.slice(0, 300));
+          });
+        }
+        return res.json();
+      });
+    }
+
+    return attempt(0);
   }
 
   // GHL's REST API needs a custom object's schemaKey fully qualified as
@@ -418,9 +480,13 @@
       var paymentIdFieldIds = fieldIdsFor("aaaPaymentId");
       var expectedFieldIds = fieldIdsFor("expectedTowAmount");
       return loadAllOpportunities(pipeline.id).then(function (opps) {
+        // Concurrency is now secondary to rateLimitGate() in ghlApi() above
+        // (that's what actually keeps this under GHL's burst limit) - kept
+        // modest here too so a large pipeline doesn't pile up hundreds of
+        // requests queued behind the gate at once.
         return mapWithConcurrency(
           opps,
-          6,
+          4,
           function (o) { return getOpportunity(o.id); },
           onProgress
         ).then(function (fullOpps) {

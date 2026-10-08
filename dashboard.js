@@ -95,8 +95,34 @@
   }
 
   // ---------------------------------------------------------------------
-  // GHL API client
+  // GHL API client, with built-in rate-limit pacing + 429 retry/backoff
+  // (kept identical to setup.js's copy - see its comment for the full
+  // rationale: GHL's burst limit is 100 req/10s per location, shared across
+  // every tab/staff member hitting it, and setup.js's statement-import
+  // Preview hit a live 429 once the dispatch pipeline grew past ~1,500
+  // Opportunities from the Towbook backfill. This dashboard paginates the
+  // same location's API on every load, so it gets the same protection.
   // ---------------------------------------------------------------------
+  var RATE_LIMIT_WINDOW_MS = 10000;
+  var RATE_LIMIT_MAX_PER_WINDOW = 70;
+  var requestTimestamps = [];
+
+  function sleep(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  function rateLimitGate() {
+    var now = Date.now();
+    requestTimestamps = requestTimestamps.filter(function (t) { return now - t < RATE_LIMIT_WINDOW_MS; });
+    if (requestTimestamps.length < RATE_LIMIT_MAX_PER_WINDOW) {
+      requestTimestamps.push(now);
+      return Promise.resolve();
+    }
+    var oldest = requestTimestamps[0];
+    var waitMs = RATE_LIMIT_WINDOW_MS - (now - oldest) + 25;
+    return sleep(waitMs).then(rateLimitGate);
+  }
+
   function ghlApi(path, opts) {
     opts = opts || {};
     var headers = {
@@ -104,20 +130,40 @@
       Version: opts.version || CONFIG.apiVersions.objects,
     };
     if (opts.body) headers["Content-Type"] = "application/json";
-    return fetch(CONFIG.apiBase + path, {
-      method: opts.method || "GET",
-      headers: headers,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-    }).then(function (res) {
-      if (!res.ok) {
-        return res
-          .text()
-          .then(function (t) {
-            throw new Error("GHL API " + res.status + " " + path + ": " + t.slice(0, 300));
-          });
-      }
-      return res.json();
-    });
+    var maxRetries = 5;
+
+    function attempt(retryCount) {
+      return rateLimitGate().then(function () {
+        return fetch(CONFIG.apiBase + path, {
+          method: opts.method || "GET",
+          headers: headers,
+          body: opts.body ? JSON.stringify(opts.body) : undefined,
+        });
+      }).then(function (res) {
+        if (res.status === 429) {
+          if (retryCount >= maxRetries) {
+            return res.text().then(function (t) {
+              throw new Error("GHL API 429 " + path + " (still rate-limited after " + maxRetries + " retries): " + t.slice(0, 300));
+            });
+          }
+          var retryAfterHeader = res.headers && res.headers.get && res.headers.get("Retry-After");
+          var retryAfterMs = retryAfterHeader ? parseFloat(retryAfterHeader) * 1000 : NaN;
+          var waitMs = isNaN(retryAfterMs) ? Math.min(1000 * Math.pow(2, retryCount), 15000) : retryAfterMs;
+          waitMs += Math.floor(Math.random() * 300);
+          return sleep(waitMs).then(function () { return attempt(retryCount + 1); });
+        }
+        if (!res.ok) {
+          return res
+            .text()
+            .then(function (t) {
+              throw new Error("GHL API " + res.status + " " + path + ": " + t.slice(0, 300));
+            });
+        }
+        return res.json();
+      });
+    }
+
+    return attempt(0);
   }
 
   function qs(params) {
