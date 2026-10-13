@@ -6,27 +6,36 @@
  * field minus another live — and the Opportunity's "AAA Payment Difference"
  * field is deliberately Text (not Number), to preserve the sign, which
  * means GHL's native widgets can't touch it at all (see setup.js's
- * moneyProp()/aaaPaymentDifference comments for why it's Text).
+ * writeOpportunityFields()/aaaPaymentDifference comments for why it's Text).
  *
- * This widget sidesteps both problems: it reads straight off the
- * "aaa_payments" custom object (which has real Number-typed
- * expected_tow_amount / gross_paid_amount), computes Actual − Expected
- * itself in the browser, and recomputes instantly on "Refresh data" — no
- * server round trip, just a re-pull + re-sum client-side.
+ * This widget sidesteps both problems: it reads straight off each
+ * dispatch-pipeline Opportunity's own custom fields (real Number-valued
+ * "Expected Tow Amount" / "AAA Gross Paid Amount"), computes Actual −
+ * Expected itself in the browser, and recomputes instantly on "Refresh
+ * data" — no server round trip, just a re-pull + re-sum client-side.
+ *
+ * REMOVED (2026-10-13): this used to read a separate "aaa_payments" Custom
+ * Object instead of the Opportunity directly — the client deleted that
+ * object on purpose (AAA payment data belongs on the Opportunity, not
+ * duplicated into a second object), so this file no longer touches it at
+ * all. One real consequence: a statement row that had NO matching
+ * Opportunity at all ("no match" in Setup's Preview) has nothing to read
+ * here anymore — there's no Opportunity to look at — so it can't appear in
+ * this table the way it briefly could when it was mirrored into the Custom
+ * Object. It's still visible at import time in Setup's own Preview; it just
+ * isn't persisted anywhere after that. See loadAaaOpportunities()/
+ * mapOpportunity() below.
  *
  * Year/Month filtering (2026-10-08): REMOVED for now, not just hidden. It
- * depended entirely on each record's pay_date, and setup.js's Apply step
- * never actually wrote pay_date onto these records until just now (see its
- * own 2026-10-08 comment on writeAaaRecord/writeUnmatchedAaaRecord) — so
- * every record created before that fix has no usable date, which made a
- * date filter actively misleading (it would silently exclude most or all
- * of your real data instead of showing it). The Pay Date column is gone
- * from the table for the same reason. The underlying pure functions
- * (parsePayDateParts, distinctYears, filterRows) are still here and still
- * tested — re-enabling the Year/Month UI is a small, contained change once
- * pay_date is reliably populated (either from new reconciliations going
- * forward under the fixed setup.js, or a one-off backfill of older
- * records).
+ * depended entirely on each row's pay date, and setup.js's Apply step never
+ * actually wrote "AAA Pay Date" onto the Opportunity until recently (see
+ * its own 2026-10-08 comment) — so an older Opportunity can still have no
+ * usable date, which made a date filter actively misleading (it would
+ * silently exclude most or all of your real data instead of showing it).
+ * The Pay Date column is gone from the table for the same reason. The
+ * underlying pure functions (parsePayDateParts, distinctYears, filterRows)
+ * are still here and still tested — re-enabling the Year/Month UI is a
+ * small, contained change once Pay Date is reliably populated everywhere.
  *
  * ============================================================================
  * WHAT TO PASTE INTO GHL (Website/Funnel builder -> Custom HTML/CSS/JS
@@ -36,13 +45,15 @@
  *   <div id="cjt-aaa-diff-root"></div>
  *   <script>
  *     // Same CJT_CONFIG block already pasted on your dashboard/setup pages
- *     // — reuse it as-is, this widget only reads locationId/privateToken
- *     // (and objectKeys.aaa / apiVersions.objects if you've customized
- *     // those). If this element is on its own page with no CJT_CONFIG
- *     // already on it, paste the full block from your dashboard snippet.
+ *     // — reuse it as-is. This reads locationId/privateToken plus
+ *     // dispatchPipelineName (to find the Opportunities to scan) and
+ *     // apiVersions.pipelines/opportunities if you've customized those. If
+ *     // this element is on its own page with no CJT_CONFIG already on it,
+ *     // paste the full block from your dashboard snippet.
  *     window.CJT_CONFIG = {
  *       locationId: "THEIR_GHL_LOCATION_ID",
- *       privateToken: "THEIR_GHL_PRIVATE_INTEGRATION_TOKEN"
+ *       privateToken: "THEIR_GHL_PRIVATE_INTEGRATION_TOKEN",
+ *       dispatchPipelineName: "Towing Dispatch"
  *     };
  *   </script>
  *   <script src="https://cdn.jsdelivr.net/gh/YOUR_GH_ORG/cjt-ops-dashboard@main/aaa-diff-widget.js"></script>
@@ -62,11 +73,10 @@
     apiBase: "https://services.leadconnectorhq.com",
     locationId: "",
     privateToken: "",
-    objectKeys: { aaa: "aaa_payments" },
-    apiVersions: { objects: "v3" },
+    dispatchPipelineName: "Towing Dispatch",
+    apiVersions: { pipelines: "v3", opportunities: "2021-07-28" },
   };
   var CONFIG = Object.assign({}, DEFAULTS, window.CJT_CONFIG || {});
-  CONFIG.objectKeys = Object.assign({}, DEFAULTS.objectKeys, (window.CJT_CONFIG || {}).objectKeys || {});
   CONFIG.apiVersions = Object.assign({}, DEFAULTS.apiVersions, (window.CJT_CONFIG || {}).apiVersions || {});
 
   // ---------------------------------------------------------------------
@@ -104,7 +114,7 @@
     opts = opts || {};
     var headers = {
       Authorization: "Bearer " + CONFIG.privateToken,
-      Version: opts.version || CONFIG.apiVersions.objects,
+      Version: opts.version || CONFIG.apiVersions.opportunities,
     };
     if (opts.body) headers["Content-Type"] = "application/json";
     var maxRetries = 5;
@@ -139,36 +149,125 @@
     return attempt(0);
   }
 
-  function objectSchemaKey(shortKey) {
-    return "custom_objects." + shortKey;
+  function qs(params) {
+    return Object.keys(params)
+      .filter(function (k) { return params[k] !== undefined && params[k] !== null && params[k] !== ""; })
+      .map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]); })
+      .join("&");
   }
-
-  // Paginates POST /objects/:schemaKey/records/search using searchAfter —
-  // identical to dashboard.js's loadAllObjectRecords().
-  function loadAllObjectRecords(schemaKey) {
-    var pageLimit = 100;
-    var all = [];
-    function next(searchAfter) {
-      var body = { locationId: CONFIG.locationId, page: 1, pageLimit: pageLimit, query: "" };
-      if (searchAfter) body.searchAfter = searchAfter;
-      return ghlApi("/objects/" + objectSchemaKey(schemaKey) + "/records/search", { method: "POST", version: CONFIG.apiVersions.objects, body: body }).then(function (res) {
-        var batch = res.records || [];
+  function loadPipelines() {
+    return ghlApi("/opportunities/pipelines?" + qs({ locationId: CONFIG.locationId }), { version: CONFIG.apiVersions.pipelines }).then(function (res) {
+      return res.pipelines || [];
+    });
+  }
+  // Paginates /opportunities/search for one pipeline — identical to
+  // dashboard.js's copy of the same function.
+  function loadAllOpportunities(pipelineId) {
+    var limit = 100, page = 1, all = [];
+    function next() {
+      var url = "/opportunities/search?" + qs({ location_id: CONFIG.locationId, pipeline_id: pipelineId, status: "all", limit: limit, page: page });
+      return ghlApi(url, { version: CONFIG.apiVersions.opportunities }).then(function (res) {
+        var batch = res.opportunities || [];
         all = all.concat(batch);
-        if (batch.length < pageLimit || all.length > 5000) return all;
-        var last = batch[batch.length - 1];
-        return next(last && last.searchAfter);
+        if (batch.length < limit || page > 20) return all;
+        page += 1;
+        return next();
       });
     }
-    return next(null);
+    return next();
+  }
+
+  // ---------------------------------------------------------------------
+  // Opportunity custom-field ID resolution — same trimmed copy of
+  // setup.js's FIELD_ID_FALLBACKS/FIELD_NAME_CANDIDATES/resolveFieldIds()
+  // pattern as dashboard.js/aaa-diff-stat-tile.js carry (see dashboard.js's
+  // own comment for the full rationale). Added 2026-10-13 when this widget
+  // moved off the aaa_payments Custom Object and onto the Opportunity
+  // directly.
+  // ---------------------------------------------------------------------
+  var FIELD_ID_FALLBACKS = {
+    workOrderNumber: ["gkJwODzLAFBtALkbUm54", "Oz3NeGwx2PxgrzaihYWl"],
+    expectedTowAmount: ["G3NwXSgdfozNGLPpxnzx"],
+    aaaPaymentId: ["PwhfIoJkhnhlcLlU855m"],
+    aaaGrossPaid: ["x6BZnE668LiqEk76S1TW"],
+    aaaPayDate: ["2ERL2vncdpLAjD027qXz"],
+    // No fallback for this one on purpose — see setup.js's own comment on
+    // this same constant for why (the field's been deleted/recreated under
+    // a new ID more than once; only the by-name lookup below is durable).
+    aaaPaymentDifference: [],
+  };
+  var FIELD_NAME_CANDIDATES = {
+    workOrderNumber: ["work order number"],
+    expectedTowAmount: ["expected tow amount"],
+    aaaPaymentId: ["aaa payment id"],
+    aaaGrossPaid: ["aaa gross paid amount"],
+    aaaPayDate: ["aaa pay date"],
+    aaaPaymentDifference: ["aaa payment difference"],
+  };
+  var resolvedFields = null;
+  function fetchCustomFieldDefs(model) {
+    var path = "/locations/" + CONFIG.locationId + "/customFields" + (model ? "?model=" + encodeURIComponent(model) : "");
+    return ghlApi(path, { version: "v3" }).then(function (res) { return Array.isArray(res) ? res : res.customFields || []; });
+  }
+  function resolveFieldIds() {
+    if (resolvedFields) return Promise.resolve(resolvedFields);
+    return Promise.all([fetchCustomFieldDefs(), fetchCustomFieldDefs("opportunity")]).then(function (results) {
+      var byId = {};
+      results[0].concat(results[1]).forEach(function (f) { if (f && f.id) byId[f.id] = f; });
+      var allFields = Object.keys(byId).map(function (id) { return byId[id]; });
+      var ids = {};
+      Object.keys(FIELD_NAME_CANDIDATES).forEach(function (key) {
+        var match = allFields.filter(function (f) {
+          return FIELD_NAME_CANDIDATES[key].indexOf(String(f.name || "").trim().toLowerCase()) !== -1;
+        })[0];
+        if (match) ids[key] = match.id;
+        else if (FIELD_ID_FALLBACKS[key] && FIELD_ID_FALLBACKS[key][0]) ids[key] = FIELD_ID_FALLBACKS[key][0];
+        else ids[key] = null;
+      });
+      resolvedFields = { ids: ids };
+      return resolvedFields;
+    });
+  }
+  function fieldIdsFor(key) {
+    var out = [];
+    var resolved = resolvedFields && resolvedFields.ids[key];
+    if (resolved) out.push(resolved);
+    (FIELD_ID_FALLBACKS[key] || []).forEach(function (id) { if (out.indexOf(id) === -1) out.push(id); });
+    return out;
+  }
+  function getCustomField(opp, fieldIds) {
+    var fields = opp.customFields || [];
+    for (var i = 0; i < fields.length; i++) {
+      if (fieldIds.indexOf(fields[i].id) !== -1) return fields[i].fieldValue;
+    }
+    return null;
+  }
+  function parseMoney(raw) {
+    if (raw === null || raw === undefined) return null;
+    var s = String(raw).trim();
+    if (s === "") return null;
+    s = s.replace(/\$/g, "").replace(/,/g, "").trim();
+    if (s[0] === "(" && s[s.length - 1] === ")") s = "-" + s.slice(1, -1);
+    var n = parseFloat(s);
+    return isNaN(n) ? null : n;
+  }
+
+  // Resolves fields, finds the dispatch pipeline, and pages every
+  // Opportunity in it — this widget's one and only data source now.
+  function loadAaaOpportunities() {
+    return Promise.all([resolveFieldIds(), loadPipelines()]).then(function (results) {
+      var pipelines = results[1];
+      var pipeline = pipelines.filter(function (p) {
+        return (p.name || "").toLowerCase() === CONFIG.dispatchPipelineName.toLowerCase();
+      })[0];
+      if (!pipeline) throw new Error('No pipeline named "' + CONFIG.dispatchPipelineName + '" found in this GHL location.');
+      return loadAllOpportunities(pipeline.id);
+    });
   }
 
   // ---------------------------------------------------------------------
   // Pure data functions — exposed below for testing, no DOM/network.
   // ---------------------------------------------------------------------
-  function propVal(v) {
-    if (v && typeof v === "object" && "value" in v) return v.value;
-    return v;
-  }
 
   // Handles the two Pay Date shapes seen in this project's real data
   // ("YYYY-MM-DD" from a cleaned CSV import, "M/D/YYYY" from AAA's raw
@@ -190,29 +289,34 @@
     return null;
   }
 
-  // Maps one aaa_payments record to the row shape this widget uses. The
-  // difference is ALWAYS computed live here (gross - expected) when both
-  // are present — never trusted from the record's own stored
-  // payment_difference_value — so this widget stays correct even if a
-  // record's stored value ever drifts from its own gross/expected fields.
-  // Falls back to the stored value only when one side is missing (nothing
-  // to compute from).
-  function mapRecord(rec) {
-    var p = rec.properties || {};
-    var gross = propVal(p.gross_paid_amount);
-    var expected = propVal(p.expected_tow_amount);
-    var storedDiff = p.payment_difference_value;
-    var diff = (gross != null && expected != null) ? (gross - expected) : (typeof storedDiff === "number" ? storedDiff : null);
+  // Maps one GHL Opportunity to the row shape this widget uses — same shape
+  // mapRecord() used to produce off the now-removed aaa_payments Custom
+  // Object. The difference is ALWAYS computed live here (gross - expected)
+  // when both are present — never trusted from the Opportunity's own stored
+  // "AAA Payment Difference" text — so this widget stays correct even if
+  // that field ever drifts from the actual gross/expected fields. Falls
+  // back to the stored value only when one side is missing (nothing to
+  // compute from). Only Opportunities with a Payment ID or a Gross Paid
+  // amount are AAA payments at all — callers filter on .hasPayment.
+  function mapOpportunity(o) {
+    var gross = parseMoney(getCustomField(o, fieldIdsFor("aaaGrossPaid")));
+    var expected = parseMoney(getCustomField(o, fieldIdsFor("expectedTowAmount")));
+    var paymentId = getCustomField(o, fieldIdsFor("aaaPaymentId"));
+    var payDate = getCustomField(o, fieldIdsFor("aaaPayDate"));
+    var storedDiff = parseMoney(getCustomField(o, fieldIdsFor("aaaPaymentDifference")));
+    var diff = (gross != null && expected != null) ? (gross - expected) : storedDiff;
+    var hasPayment = !!(paymentId || gross != null);
     return {
-      recordId: rec.id,
-      paymentId: p.aaa_payment_id || null,
-      wo: p.work_order_number || null,
-      payDate: p.pay_date || null,
-      dateParts: parsePayDateParts(p.pay_date),
-      status: p.reconciliation_status || null,
+      recordId: o.id,
+      paymentId: paymentId || null,
+      wo: getCustomField(o, fieldIdsFor("workOrderNumber")) || null,
+      payDate: payDate || null,
+      dateParts: parsePayDateParts(payDate),
+      status: !hasPayment ? null : (expected != null ? "matched" : "exception"),
       gross: gross,
       expected: expected,
       diff: diff,
+      hasPayment: hasPayment,
     };
   }
 
@@ -313,16 +417,17 @@
 
   window.__CJT_AAA_DIFF_INTERNAL__ = {
     CONFIG: CONFIG,
-    propVal: propVal,
+    parseMoney: parseMoney,
+    getCustomField: getCustomField,
     parsePayDateParts: parsePayDateParts,
-    mapRecord: mapRecord,
+    mapOpportunity: mapOpportunity,
     distinctYears: distinctYears,
     filterRows: filterRows,
     computeAggregates: computeAggregates,
     sortRowsForDisplay: sortRowsForDisplay,
     buildCsv: buildCsv,
     csvFilenameFor: csvFilenameFor,
-    loadAllObjectRecords: loadAllObjectRecords,
+    loadAaaOpportunities: loadAaaOpportunities,
   };
 
   // ---------------------------------------------------------------------
@@ -467,9 +572,9 @@
         els.adwRefresh.disabled = false;
         return;
       }
-      internal.loadAllObjectRecords(CONFIG.objectKeys.aaa)
-        .then(function (records) {
-          allRows = records.map(internal.mapRecord);
+      internal.loadAaaOpportunities()
+        .then(function (opps) {
+          allRows = opps.map(internal.mapOpportunity).filter(function (r) { return r.hasPayment; });
           render();
           els.adwStatus.textContent = "";
           els.adwAsOf.textContent = "As of " + new Date().toLocaleTimeString();

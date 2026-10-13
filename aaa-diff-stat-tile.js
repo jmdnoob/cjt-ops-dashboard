@@ -5,16 +5,23 @@
  * "Expected Tow Amount" / "AAA Actual Payments" tiles: a plain, big-number
  * view of Actual − Expected, styled to drop in beside those two native
  * tiles. GHL can't produce this tile itself — its widgets only Sum/Average
- * a field's STORED value, and the only "difference" field GHL has is Text
- * (kept that way deliberately to preserve the sign — see setup.js's
- * moneyProp() comment) — so this reads the real Number-typed
- * expected_tow_amount / gross_paid_amount off the "aaa_payments" custom
- * object instead and computes the subtraction itself in the browser.
+ * a field's STORED value, and the "AAA Payment Difference" field on the
+ * Opportunity is deliberately Text, not Number (kept that way to preserve
+ * the sign — see setup.js's writeOpportunityFields() comment) — so this
+ * reads the real Number-valued "AAA Gross Paid Amount" / "Expected Tow
+ * Amount" custom fields straight off each dispatch-pipeline Opportunity and
+ * computes the subtraction itself in the browser.
  *
- * All-time total, no date filter — pay_date on this object isn't reliably
- * populated yet (setup.js only started writing it 2026-10-08; see its own
- * comment), so this intentionally doesn't try to slice by year/month. Once
- * pay_date is reliable this can grow a period filter the same way
+ * REMOVED (2026-10-13): this used to read a separate "aaa_payments" Custom
+ * Object instead of the Opportunity directly — the client deleted that
+ * object on purpose (AAA payment data belongs on the Opportunity, not
+ * duplicated into a second object), so this file no longer touches it at
+ * all. See loadAaaRows() below.
+ *
+ * All-time total, no date filter — "AAA Pay Date" isn't reliably populated
+ * on every older Opportunity (setup.js only started writing it 2026-10-08;
+ * see its own comment), so this intentionally doesn't try to slice by
+ * year/month. Once it's reliable this can grow a period filter the same way
  * aaa-diff-widget.js's table view could.
  *
  * ============================================================================
@@ -25,11 +32,13 @@
  *   <div id="cjt-aaa-stat-root"></div>
  *   <script>
  *     // Same CJT_CONFIG block already pasted on your dashboard/setup pages
- *     // — reuse it as-is, this only reads locationId/privateToken (and
- *     // objectKeys.aaa / apiVersions.objects if you've customized those).
+ *     // — reuse it as-is. This reads locationId/privateToken plus
+ *     // dispatchPipelineName (to find the Opportunities to scan) and
+ *     // apiVersions.pipelines/opportunities if you've customized those.
  *     window.CJT_CONFIG = {
  *       locationId: "THEIR_GHL_LOCATION_ID",
- *       privateToken: "THEIR_GHL_PRIVATE_INTEGRATION_TOKEN"
+ *       privateToken: "THEIR_GHL_PRIVATE_INTEGRATION_TOKEN",
+ *       dispatchPipelineName: "Towing Dispatch"
  *     };
  *   </script>
  *   <script src="https://cdn.jsdelivr.net/gh/YOUR_GH_ORG/cjt-ops-dashboard@main/aaa-diff-stat-tile.js"></script>
@@ -45,11 +54,10 @@
     apiBase: "https://services.leadconnectorhq.com",
     locationId: "",
     privateToken: "",
-    objectKeys: { aaa: "aaa_payments" },
-    apiVersions: { objects: "v3" },
+    dispatchPipelineName: "Towing Dispatch",
+    apiVersions: { pipelines: "v3", opportunities: "2021-07-28" },
   };
   var CONFIG = Object.assign({}, DEFAULTS, window.CJT_CONFIG || {});
-  CONFIG.objectKeys = Object.assign({}, DEFAULTS.objectKeys, (window.CJT_CONFIG || {}).objectKeys || {});
   CONFIG.apiVersions = Object.assign({}, DEFAULTS.apiVersions, (window.CJT_CONFIG || {}).apiVersions || {});
 
   // Same rate-limit pacing + 429 retry/backoff as the other CJT tools (see
@@ -72,7 +80,7 @@
   }
   function ghlApi(path, opts) {
     opts = opts || {};
-    var headers = { Authorization: "Bearer " + CONFIG.privateToken, Version: opts.version || CONFIG.apiVersions.objects };
+    var headers = { Authorization: "Bearer " + CONFIG.privateToken, Version: opts.version || CONFIG.apiVersions.opportunities };
     if (opts.body) headers["Content-Type"] = "application/json";
     var maxRetries = 5;
     function attempt(retryCount) {
@@ -95,40 +103,126 @@
     }
     return attempt(0);
   }
-  function objectSchemaKey(shortKey) { return "custom_objects." + shortKey; }
-  function loadAllObjectRecords(schemaKey) {
-    var pageLimit = 100;
-    var all = [];
-    function next(searchAfter) {
-      var body = { locationId: CONFIG.locationId, page: 1, pageLimit: pageLimit, query: "" };
-      if (searchAfter) body.searchAfter = searchAfter;
-      return ghlApi("/objects/" + objectSchemaKey(schemaKey) + "/records/search", { method: "POST", version: CONFIG.apiVersions.objects, body: body }).then(function (res) {
-        var batch = res.records || [];
+  function qs(params) {
+    return Object.keys(params)
+      .filter(function (k) { return params[k] !== undefined && params[k] !== null && params[k] !== ""; })
+      .map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]); })
+      .join("&");
+  }
+  function loadPipelines() {
+    return ghlApi("/opportunities/pipelines?" + qs({ locationId: CONFIG.locationId }), { version: CONFIG.apiVersions.pipelines }).then(function (res) {
+      return res.pipelines || [];
+    });
+  }
+  // Paginates /opportunities/search for one pipeline — identical to
+  // dashboard.js's copy of the same function.
+  function loadAllOpportunities(pipelineId) {
+    var limit = 100, page = 1, all = [];
+    function next() {
+      var url = "/opportunities/search?" + qs({ location_id: CONFIG.locationId, pipeline_id: pipelineId, status: "all", limit: limit, page: page });
+      return ghlApi(url, { version: CONFIG.apiVersions.opportunities }).then(function (res) {
+        var batch = res.opportunities || [];
         all = all.concat(batch);
-        if (batch.length < pageLimit || all.length > 5000) return all;
-        var last = batch[batch.length - 1];
-        return next(last && last.searchAfter);
+        if (batch.length < limit || page > 20) return all;
+        page += 1;
+        return next();
       });
     }
-    return next(null);
+    return next();
   }
 
-  function propVal(v) {
-    if (v && typeof v === "object" && "value" in v) return v.value;
-    return v;
+  // ---------------------------------------------------------------------
+  // Opportunity custom-field ID resolution — same trimmed copy of
+  // setup.js's FIELD_ID_FALLBACKS/FIELD_NAME_CANDIDATES/resolveFieldIds()
+  // pattern as dashboard.js carries (see its own comment for the full
+  // rationale). Added 2026-10-13 when this tile moved off the aaa_payments
+  // Custom Object and onto the Opportunity directly.
+  // ---------------------------------------------------------------------
+  var FIELD_ID_FALLBACKS = {
+    expectedTowAmount: ["G3NwXSgdfozNGLPpxnzx"],
+    aaaGrossPaid: ["x6BZnE668LiqEk76S1TW"],
+    aaaPaymentId: ["PwhfIoJkhnhlcLlU855m"],
+  };
+  var FIELD_NAME_CANDIDATES = {
+    expectedTowAmount: ["expected tow amount"],
+    aaaGrossPaid: ["aaa gross paid amount"],
+    aaaPaymentId: ["aaa payment id"],
+  };
+  var resolvedFields = null;
+  function fetchCustomFieldDefs(model) {
+    var path = "/locations/" + CONFIG.locationId + "/customFields" + (model ? "?model=" + encodeURIComponent(model) : "");
+    return ghlApi(path, { version: "v3" }).then(function (res) { return Array.isArray(res) ? res : res.customFields || []; });
+  }
+  function resolveFieldIds() {
+    if (resolvedFields) return Promise.resolve(resolvedFields);
+    return Promise.all([fetchCustomFieldDefs(), fetchCustomFieldDefs("opportunity")]).then(function (results) {
+      var byId = {};
+      results[0].concat(results[1]).forEach(function (f) { if (f && f.id) byId[f.id] = f; });
+      var allFields = Object.keys(byId).map(function (id) { return byId[id]; });
+      var ids = {};
+      Object.keys(FIELD_NAME_CANDIDATES).forEach(function (key) {
+        var match = allFields.filter(function (f) {
+          return FIELD_NAME_CANDIDATES[key].indexOf(String(f.name || "").trim().toLowerCase()) !== -1;
+        })[0];
+        if (match) ids[key] = match.id;
+        else if (FIELD_ID_FALLBACKS[key] && FIELD_ID_FALLBACKS[key][0]) ids[key] = FIELD_ID_FALLBACKS[key][0];
+        else ids[key] = null;
+      });
+      resolvedFields = { ids: ids };
+      return resolvedFields;
+    });
+  }
+  function fieldIdsFor(key) {
+    var out = [];
+    var resolved = resolvedFields && resolvedFields.ids[key];
+    if (resolved) out.push(resolved);
+    (FIELD_ID_FALLBACKS[key] || []).forEach(function (id) { if (out.indexOf(id) === -1) out.push(id); });
+    return out;
+  }
+  function getCustomField(opp, fieldIds) {
+    var fields = opp.customFields || [];
+    for (var i = 0; i < fields.length; i++) {
+      if (fieldIds.indexOf(fields[i].id) !== -1) return fields[i].fieldValue;
+    }
+    return null;
+  }
+  function parseMoney(raw) {
+    if (raw === null || raw === undefined) return null;
+    var s = String(raw).trim();
+    if (s === "") return null;
+    s = s.replace(/\$/g, "").replace(/,/g, "").trim();
+    if (s[0] === "(" && s[s.length - 1] === ")") s = "-" + s.slice(1, -1);
+    var n = parseFloat(s);
+    return isNaN(n) ? null : n;
   }
 
-  // Sums Actual − Expected across every reconciled payment — all-time, no
-  // date filter (see the top-of-file note for why). A row only counts
-  // toward the difference when BOTH its Expected and Actual are present;
-  // rows with no Expected Tow Amount yet are tallied separately so they're
-  // visible, never silently folded into the total as if they were zero.
-  function computeNetDiff(records) {
+  // Resolves fields, finds the dispatch pipeline, and pages every
+  // Opportunity in it — this tile's one and only data source now.
+  function loadAaaOpportunities() {
+    return Promise.all([resolveFieldIds(), loadPipelines()]).then(function (results) {
+      var pipelines = results[1];
+      var pipeline = pipelines.filter(function (p) {
+        return (p.name || "").toLowerCase() === CONFIG.dispatchPipelineName.toLowerCase();
+      })[0];
+      if (!pipeline) throw new Error('No pipeline named "' + CONFIG.dispatchPipelineName + '" found in this GHL location.');
+      return loadAllOpportunities(pipeline.id);
+    });
+  }
+
+  // Sums Actual − Expected across every Opportunity that has an AAA payment
+  // on file — all-time, no date filter (see the top-of-file note for why).
+  // A row only counts toward the difference when BOTH its Expected and
+  // Actual are present; rows with no Expected Tow Amount yet are tallied
+  // separately so they're visible, never silently folded into the total as
+  // if they were zero. A row with neither a Payment ID nor a Gross Paid
+  // amount isn't an AAA payment at all and is skipped outright.
+  function computeNetDiff(opps) {
     var netDiff = 0, count = 0, missingExpectedCount = 0;
-    records.forEach(function (rec) {
-      var p = rec.properties || {};
-      var gross = propVal(p.gross_paid_amount);
-      var expected = propVal(p.expected_tow_amount);
+    opps.forEach(function (o) {
+      var paymentId = getCustomField(o, fieldIdsFor("aaaPaymentId"));
+      var gross = parseMoney(getCustomField(o, fieldIdsFor("aaaGrossPaid")));
+      var expected = parseMoney(getCustomField(o, fieldIdsFor("expectedTowAmount")));
+      if (!paymentId && gross == null) return;
       if (expected == null) { missingExpectedCount += 1; return; }
       if (gross == null) return;
       netDiff += (gross - expected);
@@ -139,9 +233,10 @@
 
   window.__CJT_AAA_STAT_INTERNAL__ = {
     CONFIG: CONFIG,
-    propVal: propVal,
+    parseMoney: parseMoney,
+    getCustomField: getCustomField,
     computeNetDiff: computeNetDiff,
-    loadAllObjectRecords: loadAllObjectRecords,
+    loadAaaOpportunities: loadAaaOpportunities,
   };
 
   // ---------------------------------------------------------------------
@@ -247,9 +342,9 @@
       });
     }
 
-    internal.loadAllObjectRecords(CONFIG.objectKeys.aaa)
-      .then(function (records) {
-        var r = internal.computeNetDiff(records);
+    internal.loadAaaOpportunities()
+      .then(function (opps) {
+        var r = internal.computeNetDiff(opps);
         numEl.textContent = formatAbbrev(r.netDiff);
         numEl.className = "astNum " + (r.netDiff > 0 ? "pos" : r.netDiff < 0 ? "neg" : "");
         scheduleFit();

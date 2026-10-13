@@ -45,15 +45,17 @@
  * the dashboard page and this Setup page — there is no shared backend, the
  * GHL page source *is* the config, on both pages independently.
  *
- * CONFIRMED (2026-09-17) — the write shape for POST /objects/aaa_payments/
- * records: gross_paid_amount and expected_tow_amount are Monetary-typed
- * properties on this schema and GHL rejects a bare number for them with
- * 400 "... is missing a currency code." They must be sent the same
- * {currency, value} shape they read back as (see propVal() in
- * dashboard.js and moneyProp() below) — confirmed against a real captured
- * aaa_payments record, whose currency code is the literal string
- * "default" (not an ISO code like "USD"). payment_difference_value is a
- * plain Number-typed property on this schema and stays a bare number.
+ * REMOVED (2026-10-13) — this used to also mirror every reconciled payment
+ * into a separate "aaa_payments" Custom Object purely so the CJT Ops
+ * Dashboard's AAA widgets could Sum/subtract fields GHL's own report
+ * widgets can't touch (see aaa-diff-widget.js/aaa-diff-stat-tile.js). The
+ * client deleted that Custom Object on purpose — AAA payment data belongs
+ * on the Opportunity, full stop, not duplicated into a second object — so
+ * this file no longer writes to it at all. writeOpportunityFields() below
+ * (the real write, onto the matched Opportunity's own custom fields) is
+ * now the ONLY write applyReconciliation() performs. The dashboard widgets
+ * were updated the same day to read these same Opportunity fields directly
+ * instead of the deleted object — see their own top-of-file comments.
  *
  * UNVERIFIED — confirm against a real token before relying on this in front
  * of a client (see README.md "What still needs testing"):
@@ -124,7 +126,8 @@
       maintenance: "maintenance_records",
       training: "training_records",
       quarters: "driver_quarters",
-      aaa: "aaa_payments",
+      // No "aaa" key — AAA payment data lives on the Opportunity only, not
+      // in a Custom Object (see the REMOVED note at the top of this file).
     },
     apiVersions: {
       pipelines: "v3",
@@ -701,11 +704,10 @@
   }
 
   // ---------------------------------------------------------------------
-  // Write step — mirrors import_aaa_payments.py's --apply path (PUT onto
-  // the matched Opportunity) and additionally creates/updates a record in
-  // the aaa_payments custom object, which is what the CJT Ops Dashboard's
-  // "AAA Payments" section actually reads (see the UNVERIFIED note above —
-  // that second part's exact write shape hasn't been confirmed live yet).
+  // Write step — mirrors import_aaa_payments.py's --apply path: PUT onto
+  // the matched Opportunity's own custom fields. That's the only write this
+  // does now (see the REMOVED note at the top of this file for why there
+  // used to be a second write into an "aaa_payments" Custom Object too).
   // ---------------------------------------------------------------------
   function writeOpportunityFields(item) {
     var customFields = [];
@@ -732,108 +734,21 @@
     });
   }
 
-  // GHL's Custom Object API rejects a bare number for a Monetary-typed
-  // property (400 "... is missing a currency code.") — confirmed live
-  // 2026-09-17. It wants the same {currency, value} shape it reads back
-  // as (propVal() in dashboard.js). "default" is the literal currency
-  // code this schema's records actually carry, confirmed from a real
-  // captured aaa_payments record — not an assumed ISO code. null passes
-  // through unwrapped for a row with no expected amount to report.
-  function moneyProp(value) {
-    if (value === null || value === undefined) return null;
-    return { currency: "default", value: value };
-  }
-
-  // Sets properties[key] = {currency, value} ONLY when there's a real value
-  // — the key is left out of `properties` entirely otherwise, it is NEVER
-  // set to a bare `null`. Confirmed live 2026-10-08: sending a literal
-  // `null` for a Monetary-typed property (not just a bare number) gets the
-  // exact same 400 "Expected Tow Amount is missing a currency code." error
-  // as the bare-number case above — GHL's Custom Object API apparently
-  // tries to read a currency code off `null` itself rather than treating it
-  // as "no value." This hit every "no match"/unmatched row on a real import
-  // (they always have no Opportunity to read an Expected Tow Amount from,
-  // so the old code always sent expected_tow_amount: null for them) and
-  // would equally have hit any "exception" row (a matched Opportunity with
-  // no Expected Tow Amount on file yet) — omitting the key is the only
-  // shape GHL accepts for "nothing to report here."
-  function setMoneyProp(properties, key, value) {
-    var m = moneyProp(value);
-    if (m !== null) properties[key] = m;
-  }
-
-  function writeAaaRecord(item) {
-    var properties = {
-      aaa_payment_id: item.paymentId || null,
-      work_order_number: item.wo,
-      // pay_date was missing here entirely until 2026-10-08 — item.payDate
-      // was parsed from the statement and written onto the Opportunity's
-      // "AAA Pay Date" field (see writeOpportunityFields above) but never
-      // onto this aaa_payments record, so every record this ever created
-      // has a blank Pay Date here (confirmed live: a widget reading this
-      // object's pay_date property came back blank for every row, even
-      // though the source statements all had a real Pay Date column).
-      // Fixing this only affects NEW writes going forward — it does NOT
-      // backfill pay_date on records already created before this fix; see
-      // the note in applyReconciliation()'s comment below for what that
-      // takes.
-      pay_date: item.payDate || null,
-      payment_difference_value: item.diff,
-      reconciliation_status: item.status,
-      exception_reason: item.exceptionReason || null,
-    };
-    setMoneyProp(properties, "gross_paid_amount", item.grossAmount);
-    setMoneyProp(properties, "expected_tow_amount", item.expectedTowAmount);
-    return ghlApi("/objects/" + objectSchemaKey(CONFIG.objectKeys.aaa) + "/records", {
-      method: "POST",
-      version: CONFIG.apiVersions.objects,
-      body: { locationId: CONFIG.locationId, properties: properties },
-    });
-  }
-
-  function writeUnmatchedAaaRecord(wo, row) {
-    var properties = {
-      aaa_payment_id: pickCol(row, "paymentId") || null,
-      work_order_number: wo,
-      pay_date: pickCol(row, "payDate") || null,
-      payment_difference_value: null,
-      reconciliation_status: "unmatched",
-      exception_reason: "No matching Tow Opportunity for Work Order Number.",
-    };
-    setMoneyProp(properties, "gross_paid_amount", parseMoney(pickCol(row, "grossAmount")));
-    // expected_tow_amount deliberately omitted — there's no matched
-    // Opportunity to read one from (see setMoneyProp's comment above for
-    // why this can't be a bare `null` instead).
-    return ghlApi("/objects/" + objectSchemaKey(CONFIG.objectKeys.aaa) + "/records", {
-      method: "POST",
-      version: CONFIG.apiVersions.objects,
-      body: { locationId: CONFIG.locationId, properties: properties },
-    });
-  }
-
-  // Applies a reconcile() result to GHL. Writes matched/exception rows to
-  // both the Opportunity and the aaa_payments object; writes no-match rows
-  // only to the aaa_payments object (there's no Opportunity to update);
-  // skips noWo and alreadyReconciled entirely, same as the Python tool.
-  //
-  // Backfilling pay_date on records created before the 2026-10-08 fix above:
-  // alreadyReconciled rows are skipped here on purpose (their Payment ID
-  // already matches what's on file, so re-writing them would be a no-op at
-  // best) — which means simply re-importing the same old statements again
-  // will NOT backfill their missing Pay Date, every row will just show up
-  // as "already done" again. Fixing those requires either a small one-off
-  // script that PUTs pay_date onto each existing aaa_payments record from
-  // its original statement data, or accepting that only payments
-  // reconciled from here forward will have a Pay Date on this object.
+  // Applies a reconcile() result to GHL. Writes matched/exception rows onto
+  // their matched Opportunity's own custom fields (writeOpportunityFields
+  // above) — the only write this performs now. No-match rows have no
+  // Opportunity to write to and, since 2026-10-13, nowhere else to go
+  // either (the aaa_payments Custom Object they used to be mirrored into is
+  // gone on purpose — see the REMOVED note at the top of this file), so
+  // they're reported in the Preview summary (renderSummary()'s "No match"
+  // tile) but never turned into a task here; skips noWo and
+  // alreadyReconciled entirely too, same as the Python tool.
   function applyReconciliation(reconciled, onProgress) {
     var tasks = [];
     reconciled.toWrite.forEach(function (item) {
       tasks.push(function () {
-        return writeOpportunityFields(item).then(function () { return writeAaaRecord(item); });
+        return writeOpportunityFields(item);
       });
-    });
-    reconciled.noMatch.forEach(function (m) {
-      tasks.push(function () { return writeUnmatchedAaaRecord(m.wo, m.row); });
     });
 
     var results = [];
@@ -1534,7 +1449,10 @@
           (rows.length > 200 ? '<div class="hint">Showing first 200 of ' + rows.length + " rows.</div>" : "");
       }
 
-      var writable = reconciled.toWrite.length + reconciled.noMatch.length;
+      // "No match" rows have nowhere to be written since the aaa_payments
+      // Custom Object was removed (2026-10-13) — they're shown above for
+      // visibility only, never counted as writable here.
+      var writable = reconciled.toWrite.length;
       if (writable > 0) {
         els.applyWrap.innerHTML =
           '<div class="applyConfirm"><label for="applyConfirmInput" style="margin:0;font-size:12.5px;">Type APPLY to confirm writing ' + writable + " row(s) to GHL:</label>" +

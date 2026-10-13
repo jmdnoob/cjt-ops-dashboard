@@ -63,7 +63,9 @@
       maintenance: "maintenance_records",
       training: "training_records",
       quarters: "driver_quarters",
-      aaa: "aaa_payments",
+      // No "aaa" key — AAA payment data lives on the Opportunity's own
+      // custom fields now, not a Custom Object (removed 2026-10-13; see
+      // loadAaa()/mapAaaFromOpportunity() below).
     },
     // Per-endpoint API "Version" header. GHL versions endpoints independently;
     // these are the values last confirmed against GHL's own docs/captured
@@ -200,6 +202,94 @@
     return next();
   }
 
+  // ---------------------------------------------------------------------
+  // Opportunity custom-field ID resolution — ported from setup.js (same
+  // FIELD_ID_FALLBACKS/FIELD_NAME_CANDIDATES/resolveFieldIds() pattern,
+  // trimmed to just the AAA-payment fields this dashboard needs to read).
+  // Added 2026-10-13 when AAA payment data moved off the aaa_payments
+  // Custom Object and onto the Opportunity itself — see loadAaa() below.
+  // Kept as its own copy (not a shared module) to match this repo's
+  // existing convention: dashboard.js/setup.js/aaa-diff-*.js are each
+  // self-contained files loaded independently via separate <script> tags.
+  // ---------------------------------------------------------------------
+  var FIELD_ID_FALLBACKS = {
+    workOrderNumber: ["gkJwODzLAFBtALkbUm54", "Oz3NeGwx2PxgrzaihYWl"],
+    expectedTowAmount: ["G3NwXSgdfozNGLPpxnzx"],
+    aaaPaymentId: ["PwhfIoJkhnhlcLlU855m"],
+    aaaGrossPaid: ["x6BZnE668LiqEk76S1TW"],
+    aaaPayDate: ["2ERL2vncdpLAjD027qXz"],
+    // No fallback for this one on purpose — see setup.js's own comment on
+    // this same constant for why (the field's been deleted/recreated under
+    // a new ID more than once; only the by-name lookup below is durable).
+    aaaPaymentDifference: [],
+  };
+  var FIELD_NAME_CANDIDATES = {
+    workOrderNumber: ["work order number"],
+    expectedTowAmount: ["expected tow amount"],
+    aaaPaymentId: ["aaa payment id"],
+    aaaGrossPaid: ["aaa gross paid amount"],
+    aaaPayDate: ["aaa pay date"],
+    aaaPaymentDifference: ["aaa payment difference"],
+  };
+  var resolvedFields = null;
+
+  function fetchCustomFieldDefs(model) {
+    var path = "/locations/" + CONFIG.locationId + "/customFields" + (model ? "?model=" + encodeURIComponent(model) : "");
+    return ghlApi(path, { version: "v3" }).then(function (res) {
+      return Array.isArray(res) ? res : res.customFields || [];
+    });
+  }
+
+  function resolveFieldIds() {
+    if (resolvedFields) return Promise.resolve(resolvedFields);
+    return Promise.all([fetchCustomFieldDefs(), fetchCustomFieldDefs("opportunity")]).then(function (results) {
+      var byId = {};
+      results[0].concat(results[1]).forEach(function (f) { if (f && f.id) byId[f.id] = f; });
+      var allFields = Object.keys(byId).map(function (id) { return byId[id]; });
+      var ids = {};
+      Object.keys(FIELD_NAME_CANDIDATES).forEach(function (key) {
+        var candidates = FIELD_NAME_CANDIDATES[key];
+        var match = allFields.filter(function (f) {
+          return candidates.indexOf(String(f.name || "").trim().toLowerCase()) !== -1;
+        })[0];
+        if (match) ids[key] = match.id;
+        else if (FIELD_ID_FALLBACKS[key] && FIELD_ID_FALLBACKS[key][0]) ids[key] = FIELD_ID_FALLBACKS[key][0];
+        else ids[key] = null;
+      });
+      resolvedFields = { ids: ids };
+      return resolvedFields;
+    });
+  }
+
+  // Matches against a *list* of candidate ids (resolved id first, then any
+  // fallback ids) so an older record written under a previous/renamed field
+  // still reads back correctly.
+  function fieldIdsFor(key) {
+    var out = [];
+    var resolved = resolvedFields && resolvedFields.ids[key];
+    if (resolved) out.push(resolved);
+    (FIELD_ID_FALLBACKS[key] || []).forEach(function (id) { if (out.indexOf(id) === -1) out.push(id); });
+    return out;
+  }
+
+  function getCustomField(opp, fieldIds) {
+    var fields = opp.customFields || [];
+    for (var i = 0; i < fields.length; i++) {
+      if (fieldIds.indexOf(fields[i].id) !== -1) return fields[i].fieldValue;
+    }
+    return null;
+  }
+
+  function parseMoney(raw) {
+    if (raw === null || raw === undefined) return null;
+    var s = String(raw).trim();
+    if (s === "") return null;
+    s = s.replace(/\$/g, "").replace(/,/g, "").trim();
+    if (s[0] === "(" && s[s.length - 1] === ")") s = "-" + s.slice(1, -1);
+    var n = parseFloat(s);
+    return isNaN(n) ? null : n;
+  }
+
   // GHL's REST API needs a custom object's schemaKey fully qualified as
   // "custom_objects.<key>" in the URL path (confirmed 2026-09-17 against a
   // real location's GET /objects/ listing — a bare key like "trucks" is
@@ -315,21 +405,49 @@
     };
   }
 
-  function mapAaa(rec) {
-    var p = rec.properties || {};
-    var gross = propVal(p.gross_paid_amount);
-    var expected = propVal(p.expected_tow_amount);
-    var diff = p.payment_difference_value;
-    if (diff === undefined && gross != null && expected != null) diff = gross - expected;
+  // Maps one GHL Opportunity to the AAA-payment row shape the UI below
+  // expects (same shape mapAaa() used to produce off the now-removed
+  // aaa_payments Custom Object — see loadAaa()'s own comment). Only
+  // Opportunities that actually HAVE AAA payment data (a Payment ID or a
+  // Gross Paid amount on file) end up in state.aaaSamples/aaaSummary —
+  // callers filter on .hasPayment.
+  //
+  // The difference is computed live from Gross − Expected whenever both are
+  // present (matches aaa-diff-widget.js's same precedence) and only falls
+  // back to the stored "AAA Payment Difference" text field when one side is
+  // missing — that field is kept as Text specifically to preserve the sign
+  // (see setup.js's writeOpportunityFields() comment), so it's a fine
+  // fallback but a live subtraction of the two Number fields is preferred
+  // when both are available.
+  function mapAaaFromOpportunity(o) {
+    var wo = getCustomField(o, fieldIdsFor("workOrderNumber"));
+    var paymentId = getCustomField(o, fieldIdsFor("aaaPaymentId"));
+    var gross = parseMoney(getCustomField(o, fieldIdsFor("aaaGrossPaid")));
+    var expected = parseMoney(getCustomField(o, fieldIdsFor("expectedTowAmount")));
+    var diff = (gross != null && expected != null)
+      ? (gross - expected)
+      : parseMoney(getCustomField(o, fieldIdsFor("aaaPaymentDifference")));
+    var hasPayment = !!(paymentId || gross != null);
+    // "matched" / "exception" mirrors setup.js's reconcile() status: a
+    // payment on an Opportunity with no Expected Tow Amount on file is an
+    // exception needing attention, same meaning as before — just evaluated
+    // against the Opportunity's current state instead of a frozen snapshot.
+    var status = !hasPayment ? null : (expected != null ? "matched" : "exception");
     return {
-      recordId: rec.id,
-      id: p.aaa_payment_id,
-      wo: p.work_order_number,
-      status: p.reconciliation_status,
+      recordId: o.id,
+      contactId: o.contactId,
+      id: paymentId,
+      wo: wo,
+      status: status,
       gross: gross,
       expected: expected,
       diff: diff,
-      reason: p.exception_reason || (diff > 0 ? "Overpaid by AAA" : diff < 0 ? "Underpaid by AAA" : null),
+      reason: !hasPayment ? null
+        : expected == null ? "No Expected Tow Amount on file yet."
+        : diff > 0 ? "Overpaid by AAA"
+        : diff < 0 ? "Underpaid by AAA"
+        : null,
+      hasPayment: hasPayment,
     };
   }
 
@@ -350,8 +468,18 @@
 
   var stageNameById = {};
 
-  function loadDispatch() {
-    return loadPipelines().then(function (pipelines) {
+  // Fetches the dispatch pipeline + every Opportunity in it exactly once
+  // per page load, shared between loadDispatch() (job/stage rows) and
+  // loadAaa() (AAA payment rows) — both need the same full Opportunity
+  // list (loadAaa() additionally needs each Opportunity's customFields,
+  // which is why resolveFieldIds() also runs here), and loadAll() below
+  // kicks both off in parallel, so this memoizes on first call rather than
+  // doubling the pipeline fetch + full /opportunities/search pagination.
+  var dispatchOppsPromise = null;
+  function loadDispatchOpportunities() {
+    if (dispatchOppsPromise) return dispatchOppsPromise;
+    dispatchOppsPromise = Promise.all([resolveFieldIds(), loadPipelines()]).then(function (results) {
+      var pipelines = results[1];
       var pipeline = pipelines.filter(function (p) {
         return (p.name || "").toLowerCase() === CONFIG.dispatchPipelineName.toLowerCase();
       })[0];
@@ -359,26 +487,33 @@
       stageNameById = {};
       (pipeline.stages || []).forEach(function (s) { stageNameById[s.id] = s.name; });
       return loadAllOpportunities(pipeline.id).then(function (opps) {
-        var stageCounts = {};
-        var rows = opps.map(function (o) {
-          var stageName = stageNameById[o.pipelineStageId] || o.pipelineStageId;
-          stageCounts[stageName] = (stageCounts[stageName] || 0) + 1;
-          return {
-            name: o.name,
-            stage: stageName,
-            status: o.status,
-            value: o.monetaryValue,
-            updatedAt: o.updatedAt,
-            contactId: o.contactId,
-          };
-        });
-        state.dispatch = {
-          opportunities: rows,
-          stageCounts: stageCounts,
-          pipelineName: pipeline.name,
-          total: rows.length,
+        return { pipeline: pipeline, opps: opps };
+      });
+    });
+    return dispatchOppsPromise;
+  }
+
+  function loadDispatch() {
+    return loadDispatchOpportunities().then(function (d) {
+      var stageCounts = {};
+      var rows = d.opps.map(function (o) {
+        var stageName = stageNameById[o.pipelineStageId] || o.pipelineStageId;
+        stageCounts[stageName] = (stageCounts[stageName] || 0) + 1;
+        return {
+          name: o.name,
+          stage: stageName,
+          status: o.status,
+          value: o.monetaryValue,
+          updatedAt: o.updatedAt,
+          contactId: o.contactId,
         };
       });
+      state.dispatch = {
+        opportunities: rows,
+        stageCounts: stageCounts,
+        pipelineName: d.pipeline.name,
+        total: rows.length,
+      };
     });
   }
 
@@ -414,9 +549,22 @@
     });
   }
 
+  // AAA payment data used to live in a separate "aaa_payments" Custom
+  // Object, read via loadAllObjectRecords(). The client deleted that object
+  // on purpose (2026-10-13) — AAA payment fields belong on the Opportunity
+  // only — so this now reads the same dispatch-pipeline Opportunities
+  // loadDispatch() already fetches (see loadDispatchOpportunities() above)
+  // and keeps only the ones that actually have AAA payment data on them.
+  //
+  // One real behavior change this brings: a statement row with no matching
+  // Opportunity at all ("no match" in Setup's Preview) has nothing to read
+  // here — there's no Opportunity to look at — so it can no longer show up
+  // in this dashboard's AAA summary the way it briefly could when it was
+  // mirrored into the Custom Object. It's still visible at import time in
+  // Setup's own Preview table; it just isn't persisted anywhere after that.
   function loadAaa() {
-    return loadAllObjectRecords(CONFIG.objectKeys.aaa).then(function (recs) {
-      var rows = recs.map(mapAaa);
+    return loadDispatchOpportunities().then(function (d) {
+      var rows = d.opps.map(mapAaaFromOpportunity).filter(function (r) { return r.hasPayment; });
       var statusCounts = {};
       var missingWo = 0;
       rows.forEach(function (r) {
@@ -715,7 +863,10 @@
     // ---- everything from here down is the same UI logic as before ----
     var LIST_URLS = {
       dispatch: ghlUrl("/opportunities/list"),
-      aaa: ghlUrl("/objects/" + CONFIG.objectKeys.aaa + "/list"),
+      // AAA payments live on dispatch-pipeline Opportunities now, not a
+      // separate Custom Object — same list as "dispatch" (removed
+      // 2026-10-13; see loadAaa()'s comment).
+      aaa: ghlUrl("/opportunities/list"),
       drivers: ghlUrl("/objects/" + CONFIG.objectKeys.drivers + "/list"),
       fleet: ghlUrl("/objects/" + CONFIG.objectKeys.fleet + "/list"),
       maintenance: ghlUrl("/objects/" + CONFIG.objectKeys.maintenance + "/list"),
@@ -730,7 +881,10 @@
       quarters: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.quarters + "/list?recordId=" + r.recordId) : LIST_URLS.quarters; },
       training: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.training + "/list?recordId=" + r.recordId) : LIST_URLS.training; },
       maintenance: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.maintenance + "/list?recordId=" + r.recordId) : LIST_URLS.maintenance; },
-      aaa: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.aaa + "/list?recordId=" + r.recordId) : LIST_URLS.aaa; },
+      // An AAA payment row IS an Opportunity now — link through its contact,
+      // same as a dispatch row (there's no standalone Opportunity-detail URL
+      // in GHL's v2 app; this mirrors the "dispatch" link exactly).
+      aaa: function (r) { return r.contactId ? ghlUrl("/contacts/detail/" + r.contactId) : LIST_URLS.aaa; },
     };
     function listLink(key) { return function () { return LIST_URLS[key]; }; }
 
@@ -1155,7 +1309,7 @@
       ];
       var linkFn = LINK_FNS.aaa;
       sectionBodyEl.innerHTML =
-        panelHead('<span class="live-tag">● Live</span> — ' + (s.total || 0).toLocaleString() + " AAA payment records imported. " + (s.missing_work_order || 0) + " are missing a work order number.", [{ label: "Open in GHL ↗", url: LIST_URLS.aaa }]) +
+        panelHead('<span class="live-tag">● Live</span> — ' + (s.total || 0).toLocaleString() + " dispatch jobs have an AAA payment on file. " + (s.missing_work_order || 0) + " are missing a work order number.", [{ label: "Open in GHL ↗", url: LIST_URLS.aaa }]) +
         '<div class="chipRow">' + chips + "</div>" +
         '<h3 class="subhead">Exceptions</h3>' + buildTable(cols, samples.exceptions, linkFn) +
         '<h3 class="subhead">Matched (sample)</h3>' + buildTable(cols, samples.unmatched, linkFn);
