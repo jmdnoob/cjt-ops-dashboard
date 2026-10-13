@@ -150,7 +150,7 @@
   // tiles GHL's own native Dashboard widgets show.
   // ---------------------------------------------------------------------
   var CSS_TEXT = [
-    ':root{--ast-panel:#fff;--ast-border:#e1e5eb;--ast-text:#1a2130;--ast-text-dim:#626b7a;--ast-crit:#b91c1c;--ast-good:#15803d}',
+    ':root{--ast-panel:#fff;--ast-border:#e4e4e9;--ast-text:#19191c;--ast-text-dim:#6b7280;--ast-crit:#dc2626;--ast-good:#15803d}',
     '#cjt-aaa-stat-root *{box-sizing:border-box}',
     // container-type:inline-size turns this element into a CSS "query
     // container" so the cqw units below are a live percentage of ITS actual

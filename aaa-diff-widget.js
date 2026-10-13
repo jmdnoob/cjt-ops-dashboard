@@ -329,10 +329,10 @@
   // UI layer
   // ---------------------------------------------------------------------
   var CSS_TEXT = [
-    ':root{--adw-bg:#f3f5f8;--adw-panel:#fff;--adw-border:#e1e5eb;--adw-text:#1a2130;--adw-text-dim:#626b7a;--adw-accent:#1d4ed8;--adw-accent-soft:#e7edfc;--adw-good:#15803d;--adw-good-soft:#e1f4e8;--adw-crit:#b91c1c;--adw-crit-soft:#fbe4e2;--adw-chip-bg:#eef1f5}',
+    ':root{--adw-bg:#f5f6f8;--adw-panel:#fff;--adw-border:#e4e4e9;--adw-text:#19191c;--adw-text-dim:#6b7280;--adw-accent:#19191c;--adw-accent-soft:#fff6de;--adw-good:#15803d;--adw-good-soft:#e1f4e8;--adw-crit:#dc2626;--adw-crit-soft:#fbe4e2;--adw-chip-bg:#eef1f5}',
     '#cjt-aaa-diff-root *{box-sizing:border-box}',
-    '#cjt-aaa-diff-root{background:var(--adw-bg);color:var(--adw-text);font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:20px 16px;border-radius:14px}',
-    '#cjt-aaa-diff-root .mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}',
+    '#cjt-aaa-diff-root{background:var(--adw-bg);color:var(--adw-text);font-family:"Roboto",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:20px 16px;border-radius:14px}',
+    '#cjt-aaa-diff-root .mono{font-family:"Roboto",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}',
     '#cjt-aaa-diff-root .adwTop{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}',
     '#cjt-aaa-diff-root h2{font-size:16px;margin:0;font-weight:700}',
     '#cjt-aaa-diff-root .adwAsOf{font-size:11.5px;color:var(--adw-text-dim)}',
@@ -345,7 +345,7 @@
     '#cjt-aaa-diff-root .adwStatus.err{color:var(--adw-crit)}',
     '#cjt-aaa-diff-root .tileGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px}',
     '#cjt-aaa-diff-root .tile{background:var(--adw-panel);border:1px solid var(--adw-border);border-radius:10px;padding:12px 14px}',
-    '#cjt-aaa-diff-root .tile .n{font-family:"IBM Plex Mono",monospace;font-size:19px;font-weight:700}',
+    '#cjt-aaa-diff-root .tile .n{font-family:"Roboto",monospace;font-size:19px;font-weight:700}',
     '#cjt-aaa-diff-root .tile .l{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--adw-text-dim);margin-top:3px}',
     '#cjt-aaa-diff-root .tile.net .n.pos{color:var(--adw-crit)}',
     '#cjt-aaa-diff-root .tile.net .n.neg{color:var(--adw-good)}',

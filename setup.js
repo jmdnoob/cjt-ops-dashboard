@@ -1026,10 +1026,10 @@
   // as dashboard.js: one file on GitHub, one script tag in GHL.
   // ---------------------------------------------------------------------
   var CSS_TEXT = [
-    ':root{--bg:#f3f5f8;--panel:#fff;--border:#e1e5eb;--text:#1a2130;--text-dim:#626b7a;--accent:#1d4ed8;--accent-soft:#e7edfc;--accent-strong:#1739ab;--good:#15803d;--good-soft:#e1f4e8;--warn:#b45309;--warn-soft:#fbeed9;--crit:#b91c1c;--crit-soft:#fbe4e2;--info:#0e7490;--info-soft:#dff2f4;--chip-bg:#eef1f5;--shadow:0 1px 2px rgba(20,25,40,.05),0 2px 10px rgba(20,25,40,.06)}',
+    ':root{--bg:#f5f6f8;--panel:#fff;--border:#e4e4e9;--text:#19191c;--text-dim:#6b7280;--accent:#19191c;--accent-soft:#fff6de;--accent-strong:#000000;--good:#15803d;--good-soft:#e1f4e8;--warn:#b45309;--warn-soft:#fbeed9;--crit:#dc2626;--crit-soft:#fbe4e2;--info:#2563eb;--info-soft:#dbeafe;--chip-bg:#eef1f5;--shadow:0 1px 2px rgba(25,25,28,.05),0 2px 10px rgba(25,25,28,.06)}',
     '#cjt-setup-root *{box-sizing:border-box}',
-    '#cjt-setup-root{background:var(--bg);color:var(--text);font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:22px 16px 60px;position:relative}',
-    '#cjt-setup-root .mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}',
+    '#cjt-setup-root{background:var(--bg);color:var(--text);font-family:"Roboto",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:22px 16px 60px;position:relative}',
+    '#cjt-setup-root .mono{font-family:"Roboto",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}',
     '#cjt-setup-root .wrap{max-width:760px;margin:0 auto}',
     '#cjt-setup-root header.top{display:flex;align-items:baseline;gap:10px;margin-bottom:4px}',
     '#cjt-setup-root header.top h1{font-size:21px;margin:0;font-weight:700;letter-spacing:-.01em}',
@@ -1046,7 +1046,7 @@
     '@media (max-width:520px){#cjt-setup-root .fieldRow{grid-template-columns:1fr}}',
     '#cjt-setup-root input[type=text],#cjt-setup-root input[type=password],#cjt-setup-root input[type=number],#cjt-setup-root textarea{width:100%;border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:13.5px;font-family:inherit;background:var(--panel);color:var(--text)}',
     '#cjt-setup-root input:focus,#cjt-setup-root textarea:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}',
-    '#cjt-setup-root textarea{resize:vertical;font-family:"IBM Plex Mono",monospace;font-size:12px}',
+    '#cjt-setup-root textarea{resize:vertical;font-family:"Roboto",monospace;font-size:12px}',
     '#cjt-setup-root .tokenRow{display:flex;gap:8px}',
     '#cjt-setup-root .tokenRow input{flex:1}',
     '#cjt-setup-root .btn{appearance:none;border:1px solid var(--border);background:var(--panel);color:var(--text);font-family:inherit;font-size:13px;font-weight:600;padding:9px 16px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:6px}',
@@ -1067,7 +1067,7 @@
     '#cjt-setup-root .copyRow{display:flex;justify-content:flex-end;margin-top:8px}',
     '#cjt-setup-root .summaryGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:16px 0}',
     '#cjt-setup-root .summaryTile{background:var(--chip-bg);border-radius:10px;padding:12px 14px;text-align:center}',
-    '#cjt-setup-root .summaryTile .n{font-family:"IBM Plex Mono",monospace;font-size:20px;font-weight:700}',
+    '#cjt-setup-root .summaryTile .n{font-family:"Roboto",monospace;font-size:20px;font-weight:700}',
     '#cjt-setup-root .summaryTile .l{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);margin-top:2px}',
     '#cjt-setup-root .summaryTile.matched .n{color:var(--good)}#cjt-setup-root .summaryTile.exception .n{color:var(--warn)}#cjt-setup-root .summaryTile.unmatched .n{color:var(--crit)}',
     '#cjt-setup-root .progressWrap{margin:14px 0;display:none}',
@@ -1090,7 +1090,7 @@
     '#cjt-setup-root .applyConfirm input{max-width:140px}',
     '#cjt-setup-root .foot-note{margin-top:22px;font-size:11.5px;color:var(--text-dim);line-height:1.6}',
     '#cjt-setup-root.cjtLocked .wrap{filter:blur(8px);pointer-events:none;user-select:none}',
-    '#cjt-setup-root .cjtLockOverlay{position:fixed;inset:0;background:rgba(20,25,40,.6);display:none;align-items:center;justify-content:center;z-index:999999;padding:16px}',
+    '#cjt-setup-root .cjtLockOverlay{position:fixed;inset:0;background:rgba(25,25,28,.6);display:none;align-items:center;justify-content:center;z-index:999999;padding:16px}',
     '#cjt-setup-root.cjtLocked .cjtLockOverlay{display:flex}',
     '#cjt-setup-root .cjtLockCard{background:var(--panel);border-radius:14px;padding:28px 26px;max-width:340px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.28);text-align:center}',
     '#cjt-setup-root .cjtLockTitle{font-size:17px;font-weight:700;margin-bottom:8px}',
@@ -1106,23 +1106,23 @@
     // regardless of where #cjt-setup-root sits on the page. Class names are
     // deliberately distinctive to keep collisions with the host GHL page's
     // own CSS unlikely.
-    '.extInstallOverlay{position:fixed;inset:0;background:rgba(20,25,40,.6);display:flex;align-items:center;justify-content:center;z-index:999999;padding:16px;font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
-    '.extInstallCard{position:relative;background:#fff;color:#1a2130;border-radius:14px;padding:26px 26px 22px;max-width:420px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.28);max-height:82vh;overflow-y:auto}',
-    '.extInstallClose{position:absolute;top:14px;right:14px;border:none;background:none;font-size:20px;line-height:1;cursor:pointer;color:#626b7a;padding:4px}',
-    '.extInstallClose:hover{color:#1a2130}',
+    '.extInstallOverlay{position:fixed;inset:0;background:rgba(25,25,28,.6);display:flex;align-items:center;justify-content:center;z-index:999999;padding:16px;font-family:"Roboto",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
+    '.extInstallCard{position:relative;background:#fff;color:#19191c;border-radius:14px;padding:26px 26px 22px;max-width:420px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.28);max-height:82vh;overflow-y:auto}',
+    '.extInstallClose{position:absolute;top:14px;right:14px;border:none;background:none;font-size:20px;line-height:1;cursor:pointer;color:#6b7280;padding:4px}',
+    '.extInstallClose:hover{color:#19191c}',
     '.extInstallTitle{font-size:17px;font-weight:700;margin-bottom:4px;padding-right:20px}',
-    '.extInstallSub{font-size:12.5px;color:#626b7a;line-height:1.5;margin-bottom:16px}',
+    '.extInstallSub{font-size:12.5px;color:#6b7280;line-height:1.5;margin-bottom:16px}',
     '.extInstallSteps{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:12px}',
     '.extInstallSteps li{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5}',
-    '.extInstallSteps .stepNum{flex:0 0 auto;width:20px;height:20px;border-radius:999px;background:#e7edfc;color:#1d4ed8;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:1px}',
+    '.extInstallSteps .stepNum{flex:0 0 auto;width:20px;height:20px;border-radius:999px;background:#fff6de;color:#19191c;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:1px}',
     '.extInstallSteps li.done .stepNum{background:#dcfce7;color:#15803d}',
     '.extInstallSteps label.stepText{display:flex;gap:8px;align-items:flex-start;flex:1;min-width:0;cursor:pointer}',
-    '.extInstallSteps label.stepText input[type="checkbox"]{flex:0 0 auto;width:15px;height:15px;margin-top:2px;accent-color:#1d4ed8;cursor:pointer}',
+    '.extInstallSteps label.stepText input[type="checkbox"]{flex:0 0 auto;width:15px;height:15px;margin-top:2px;accent-color:#19191c;cursor:pointer}',
     '.extInstallSteps .stepTxt b{font-weight:700}',
     '.extInstallSteps li.done .stepTxt{color:#8a92a3;text-decoration:line-through}',
     '.extInstallProgress{font-size:11.5px;color:#8a92a3;margin:0 0 14px}',
-    '.extInstallReset{background:none;border:none;padding:0;font-size:12px;color:#1d4ed8;cursor:pointer;text-decoration:underline}',
-    '.extInstallSteps .mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef1f5;padding:1px 5px;border-radius:4px;font-size:12px}'
+    '.extInstallReset{background:none;border:none;padding:0;font-size:12px;color:#19191c;cursor:pointer;text-decoration:underline}',
+    '.extInstallSteps .mono{font-family:"Roboto",ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef1f5;padding:1px 5px;border-radius:4px;font-size:12px}'
   ].join("\n");
 
   var PAGE_HTML =
@@ -1287,7 +1287,7 @@
     document.head.appendChild(styleEl);
     var fontLink = document.createElement("link");
     fontLink.rel = "stylesheet";
-    fontLink.href = "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap";
+    fontLink.href = "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700;900&display=swap";
     document.head.appendChild(fontLink);
     root.innerHTML = PAGE_HTML;
     initSecurity(root, function () { runApp(root); });
