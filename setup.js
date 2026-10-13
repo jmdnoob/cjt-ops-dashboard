@@ -398,10 +398,24 @@
     });
   }
 
+  // GET /opportunities/:id normally uses a single `fieldValue` key, but
+  // GHL is inconsistent about this across endpoints (confirmed on
+  // /opportunities/search, which uses type-specific keys instead —
+  // fieldValueString/fieldValueNumber/fieldValueDate/fieldValueArray). Check
+  // every key defensively so this keeps working if that inconsistency ever
+  // shows up here too.
   function getCustomField(opp, fieldIds) {
     var fields = opp.customFields || [];
     for (var i = 0; i < fields.length; i++) {
-      if (fieldIds.indexOf(fields[i].id) !== -1) return fields[i].fieldValue;
+      if (fieldIds.indexOf(fields[i].id) !== -1) {
+        var f = fields[i];
+        if (f.fieldValue !== undefined) return f.fieldValue;
+        if (f.fieldValueString !== undefined) return f.fieldValueString;
+        if (f.fieldValueNumber !== undefined) return f.fieldValueNumber;
+        if (f.fieldValueDate !== undefined) return f.fieldValueDate;
+        if (f.fieldValueArray !== undefined) return f.fieldValueArray;
+        return null;
+      }
     }
     return null;
   }

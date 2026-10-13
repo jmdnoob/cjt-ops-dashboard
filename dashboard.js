@@ -272,10 +272,26 @@
     return out;
   }
 
+  // GHL's own API is inconsistent about how a customFields entry carries its
+  // value: GET /opportunities/:id uses a single `fieldValue` key, but
+  // GET /opportunities/search (what this dashboard actually calls) uses a
+  // type-specific key instead — `fieldValueString`, `fieldValueNumber`,
+  // `fieldValueDate`, `fieldValueArray` — and never sets `fieldValue` at all.
+  // Confirmed live (2026-10-13) against real search results. Check every key
+  // rather than assuming one, so this keeps working regardless of which
+  // endpoint supplied the opportunity object.
   function getCustomField(opp, fieldIds) {
     var fields = opp.customFields || [];
     for (var i = 0; i < fields.length; i++) {
-      if (fieldIds.indexOf(fields[i].id) !== -1) return fields[i].fieldValue;
+      if (fieldIds.indexOf(fields[i].id) !== -1) {
+        var f = fields[i];
+        if (f.fieldValue !== undefined) return f.fieldValue;
+        if (f.fieldValueString !== undefined) return f.fieldValueString;
+        if (f.fieldValueNumber !== undefined) return f.fieldValueNumber;
+        if (f.fieldValueDate !== undefined) return f.fieldValueDate;
+        if (f.fieldValueArray !== undefined) return f.fieldValueArray;
+        return null;
+      }
     }
     return null;
   }
@@ -590,8 +606,35 @@
     state.meta = { lastSynced: new Date().toISOString(), objectCounts: counts };
   }
 
+  // Each section loads independently — one missing/broken Custom Object
+  // (e.g. Drivers/Fleet/Maintenance/Training/Quarters, none of which exist
+  // in this GHL location yet as of 2026-10-13) must not take the ENTIRE
+  // dashboard down. Previously this was a single Promise.all(), so any one
+  // rejection (a 404 from a Custom Object that was never created) rejected
+  // the whole batch, doRefresh()'s .catch() skipped render() entirely, and
+  // even the sections that DID load successfully (Dispatch, AAA) never got
+  // drawn. Now every loader is caught individually and logged by name —
+  // Promise.all over the caught promises always resolves once all have
+  // settled, so render() always runs and shows whatever sections succeeded
+  // while the still-unbuilt ones simply render empty (every renderer below
+  // already null-safes with `state.x || {}`).
   function loadAll() {
-    return Promise.all([loadDispatch(), loadDrivers(), loadFleet(), loadMaintenance(), loadTraining(), loadQuarters(), loadAaa()]).then(loadMeta);
+    var loaders = [
+      { key: "dispatch", fn: loadDispatch },
+      { key: "drivers", fn: loadDrivers },
+      { key: "fleet", fn: loadFleet },
+      { key: "maintenance", fn: loadMaintenance },
+      { key: "training", fn: loadTraining },
+      { key: "quarters", fn: loadQuarters },
+      { key: "aaa", fn: loadAaa },
+    ];
+    return Promise.all(
+      loaders.map(function (l) {
+        return l.fn().catch(function (err) {
+          console.error("[CJT Dashboard] \"" + l.key + "\" section failed to load (showing it empty):", err);
+        });
+      })
+    ).then(loadMeta);
   }
 
   // ---------------------------------------------------------------------
