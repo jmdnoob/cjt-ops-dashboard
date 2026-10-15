@@ -2175,10 +2175,10 @@
       }
       var os = detectOS();
       var macBtn = macAsset
-        ? '<a class="btn primary" data-os="mac" href="' + esc(releaseAssetUrl(repo, macAsset)) + '" download>Download for Mac</a>'
+        ? '<a class="btn primary" data-os="mac" href="' + esc(releaseAssetUrl(repo, macAsset)) + '" target="_blank" rel="noopener noreferrer" download>Download for Mac</a>'
         : '<button type="button" class="btn" disabled>Download for Mac (not published yet)</button>';
       var winBtn = winAsset
-        ? '<a class="btn primary" data-os="windows" href="' + esc(releaseAssetUrl(repo, winAsset)) + '" download>Download for Windows</a>'
+        ? '<a class="btn primary" data-os="windows" href="' + esc(releaseAssetUrl(repo, winAsset)) + '" target="_blank" rel="noopener noreferrer" download>Download for Windows</a>'
         : '<button type="button" class="btn" disabled title="A Windows build is planned but not built yet">Download for Windows (coming soon)</button>';
       var buttons = os === "windows" ? [winBtn, macBtn] : [macBtn, winBtn];
       var osNote =
