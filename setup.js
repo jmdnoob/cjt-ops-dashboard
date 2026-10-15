@@ -35,10 +35,10 @@
  * serving stale code until another Release is cut. "@main" always tracks
  * the newest commit on the main branch directly and has none of this trap.
  *
- * Optional: extensionRepo/extensionMacAsset/extensionWindowsAsset in
- * CJT_CONFIG control the "6. AAA Work Order Extractor" download button
- * (section 6 below) — defaults to this same GitHub repo's Releases if
- * omitted, so most clients never need to set these.
+ * Optional: extensionRepo/extensionAsset in CJT_CONFIG control the
+ * "7. AAA Work Order Extractor" download button (section 7 below) —
+ * defaults to this same GitHub repo's Releases if omitted, so most
+ * clients never need to set these.
  *
  * After changing anything here, use "Generate dashboard snippet" at the
  * bottom of the Connection section and paste the updated block onto BOTH
@@ -125,23 +125,22 @@
     setupUrl: "",
     passcodeHash: "",
     idleLockMinutes: 10,
-    // Where the AAA Work Order Extractor browser-extension installer zips
-    // are published as GitHub Releases assets — same repo this file is
-    // hosted in by default, but overridable per deployment (e.g. a
-    // reseller's own fork/org). See "6. Extension download" below and
-    // README.md "Distributing the extension" for the release/asset naming
-    // convention this points at.
+    // Where the AAA Work Order Extractor browser-extension zip is published
+    // as a GitHub Release asset — same repo this file is hosted in by
+    // default, but overridable per deployment (e.g. a reseller's own
+    // fork/org). See "7. Extension download" below and README.md
+    // "Distributing the extension" for the release/asset naming convention
+    // this points at.
+    //
+    // As of 2026-10-15 the extension talks to a shared cloud bridge
+    // (Cloud Run) instead of a per-machine native-messaging host, so there
+    // is no more installer, no OS-specific build, and no GHL token ever
+    // touches the install — one zip works identically on Mac, Windows, and
+    // Linux. Unversioned filename (same reasoning as the old Mac/Windows
+    // assets): publish a new GitHub Release with a zip named exactly this,
+    // and the download button here picks it up with no code change.
     extensionRepo: "jmdnoob/cjt-ops-dashboard",
-    extensionMacAsset: "AAA-GHL-Extractor-Mac.zip",
-    // Unversioned, same as extensionMacAsset above (was pinned to
-    // "...-v1.0.0.zip" until 2026-10-15, which meant every new Windows
-    // build needed a setup.js edit + redeploy just to ship an update — the
-    // Mac asset was never pinned this way. Dropping the version from the
-    // filename itself fixes that: publish a new GitHub Release with a zip
-    // named exactly this, and the download button here picks it up with no
-    // code change, matching the Mac side. See README.md "Distributing the
-    // extension".
-    extensionWindowsAsset: "AAA-GHL-Extractor-Windows.zip",
+    extensionAsset: "AAA-GHL-Extractor.zip",
     objectKeys: {
       drivers: "driver_profiles",
       fleet: "trucks",
@@ -1466,7 +1465,7 @@
     '</div>' +
 
     '<div class="card" id="cardExtension"><h2>7. AAA Work Order Extractor (browser extension)</h2>' +
-    '<div class="cardDesc">The dispatcher-side companion tool: it reads an AAA work order page and can sync it straight into this pipeline. It runs entirely on the dispatcher\'s own computer — no GHL token is ever stored in the extension itself. Download it, unzip it, and run the installer once per computer that needs it.</div>' +
+    '<div class="cardDesc">The dispatcher-side companion tool: it reads an AAA work order page and can sync it straight into this pipeline. No GHL token or setup ever lives on the dispatcher\'s computer — the extension just talks to a shared cloud bridge. Install is one download, no installer to run: unzip it and load it in Chrome.</div>' +
     '<div id="extDownloadWrap"></div>' +
     '</div>' +
 
@@ -2016,80 +2015,61 @@
         .finally(function () { els.btnScanDupes.disabled = false; });
     });
 
-    // ---- 7. Extension download (GitHub Releases, OS-detected) ----
+    // ---- 7. Extension download (GitHub Releases) ----
     // A webpage can never install or run software on a visitor's computer
-    // by itself — this only gets them the right zip with one click. The
-    // actual install (unzip + run the .command/.exe installer) still
-    // happens locally, once, on each computer that needs the extension.
-    // The URL below is GitHub's stable "always the newest Release" link —
-    // publishing a new GitHub Release with the same asset filename is the
-    // only thing that has to happen to ship an update; this link never
-    // changes. Unlike this URL, dashboard.js/setup.js are loaded via
-    // jsDelivr's "@main" (not "@latest" — see the top-of-file comment),
-    // since those files should always track the newest commit, not a
-    // Release tag; the two mechanisms are intentionally different because
-    // Releases here version the extension zips, not this dashboard code.
-    function detectOS() {
-      var ua = (navigator.userAgent || "") + " " + (navigator.platform || "");
-      if (/Win/i.test(ua)) return "windows";
-      if (/Mac|iPhone|iPad|iPod/i.test(ua)) return "mac";
-      return "other";
-    }
+    // by itself — this only gets them the zip with one click. The actual
+    // install (unzip + Load unpacked in the browser) still happens
+    // locally, once, on each computer that needs the extension — but as of
+    // 2026-10-15 that's the whole install: no installer script, no OS
+    // detection needed (one zip, same steps on Mac/Windows/Linux), no GHL
+    // token touches this computer at all. The URL below is GitHub's stable
+    // "always the newest Release" link — publishing a new GitHub Release
+    // with the same asset filename is the only thing that has to happen to
+    // ship an update; this link never changes. Unlike this URL,
+    // dashboard.js/setup.js are loaded via jsDelivr's "@main" (not
+    // "@latest" — see the top-of-file comment), since those files should
+    // always track the newest commit, not a Release tag; the two
+    // mechanisms are intentionally different because Releases here version
+    // the extension zip, not this dashboard code.
     function releaseAssetUrl(repo, asset) {
       return "https://github.com/" + repo + "/releases/latest/download/" + encodeURIComponent(asset);
     }
 
     // installSteps/openInstallSteps: the on-page checklist that pops up the
-    // instant someone clicks a download button, so the guidance reads as
+    // instant someone clicks the download button, so the guidance reads as
     // part of that click even though the file-save itself is the browser's
-    // own UI (see the comment above detectOS — no page can skin or
-    // automate that part, on any site). The overlay is appended to <body>,
-    // not #cjt-setup-root, so it always covers the full viewport.
-    function installSteps(kind) {
-      if (kind === "mac") {
-        return [
-          "Your download has started in the browser (its own download bar/notification, not this page) — wait for it to finish.",
-          'Open your Downloads folder and double-click <span class="mono">AAA-GHL-Extractor-Mac.zip</span> to unzip it (Safari often does this automatically right after the download finishes).',
-          'Open the unzipped <span class="mono">AAA-GHL-Extractor-Mac</span> folder.',
-          '<b>Right-click</b> <span class="mono">INSTALL-MAC.command</span> and choose <b>Open</b> — do not double-click it. macOS blocks it the first time as "from an unidentified developer"; right-click → Open tells macOS to trust it, once.',
-          "Click <b>Open</b> again in the confirmation dialog. A Terminal window runs the installer — follow its prompts (same GHL token/location ID it's always asked for). It registers the extension for Chrome, Edge, Brave, and Vivaldi (Opera works automatically too), so it doesn't matter which one you use next.",
-          'When the installer finishes, it opens your browser\'s extensions page (Chrome, or Edge if Chrome isn\'t installed) and opens the extension folder in Finder for you — turn on <b>Developer mode</b> (bottom-left), click <b>Load unpacked</b>, and select the <span class="mono">aaa-browser-extension</span> folder Finder opened to. Use whichever supported browser you actually work in — chrome://extensions or edge://extensions both work the same way.',
-          'Open an AAA Work Order page — the extension icon should show "Connected." If it doesn\'t, double-click <span class="mono">CHECK-SETUP.command</span> in that same folder for a diagnostic.'
-        ];
-      }
-      if (kind === "windows") {
-        return [
-          "Your download has started in the browser (its own download bar/notification, not this page) — wait for it to finish.",
-          'Open your Downloads folder, right-click <span class="mono">AAA-GHL-Extractor-Windows.zip</span>, and choose <b>Extract All…</b> to unzip it.',
-          'Open the unzipped <span class="mono">AAA-GHL-Extractor-Windows</span> folder.',
-          'Double-click <span class="mono">INSTALL-WINDOWS.bat</span>. If you see a blue "Windows protected your PC" SmartScreen screen, click <b>More info</b>, then <b>Run anyway</b> — this is expected for a script that isn\'t signed with a paid certificate, not a sign anything is wrong.',
-          "A console window runs the installer — follow its prompts (same GHL token/location ID it's always asked for). It registers the extension for Chrome, Edge, Brave, and Vivaldi (Opera works automatically too), so it doesn't matter which one you use next. Press Enter to close it when it's done.",
-          'When it finishes, your browser\'s extensions page opens (Chrome, or Edge if Chrome isn\'t installed) — turn on <b>Developer mode</b> (bottom-left), click <b>Load unpacked</b>, and select the <span class="mono">aaa-browser-extension</span> folder inside the unzipped folder (File Explorer opens there for you). Use whichever supported browser you actually work in — chrome://extensions or edge://extensions both work the same way.',
-          'Open an AAA Work Order page — the extension icon should show "Connected." If it doesn\'t, double-click <span class="mono">CHECK-SETUP-WINDOWS.bat</span> in that same folder for a diagnostic.'
-        ];
-      }
-      return [];
+    // own UI. The overlay is appended to <body>, not #cjt-setup-root, so it
+    // always covers the full viewport.
+    function installSteps() {
+      return [
+        "Your download has started in the browser (its own download bar/notification, not this page) — wait for it to finish.",
+        'Unzip <span class="mono">AAA-GHL-Extractor.zip</span> (double-click it on Mac; right-click → <b>Extract All…</b> on Windows) — you\'ll get a folder called <span class="mono">aaa-browser-extension</span>. Put it somewhere permanent (not the Downloads folder, so it doesn\'t get cleaned up later).',
+        'In Chrome, go to <span class="mono">chrome://extensions</span> (Edge, Brave, and Vivaldi all work the same way — just use that browser\'s own <span class="mono">://extensions</span> page instead).',
+        'Turn on <b>Developer mode</b> (top-right toggle).',
+        'Click <b>Load unpacked</b> and select the <span class="mono">aaa-browser-extension</span> folder you unzipped.',
+        "That's it — no installer, no GHL token to enter, nothing else to configure. Open an AAA Work Order page and click the extension icon to try it."
+      ];
     }
-    // Checklist progress persists per-computer (localStorage), keyed by OS,
-    // so closing the popup — or leaving the page and coming back later to
-    // finish install — doesn't lose which steps were already done. This is
-    // a per-browser convenience only: it never leaves this machine and
+    // Checklist progress persists per-computer (localStorage), so closing
+    // the popup — or leaving the page and coming back later to finish
+    // install — doesn't lose which steps were already done. This is a
+    // per-browser convenience only: it never leaves this machine and
     // nothing here is synced anywhere.
-    function installProgressKey(kind) { return "cjtExtInstallProgress_" + kind; }
-    function loadProgress(kind) {
+    var INSTALL_PROGRESS_KEY = "cjtExtInstallProgress";
+    function loadProgress() {
       try {
-        var raw = window.localStorage.getItem(installProgressKey(kind));
+        var raw = window.localStorage.getItem(INSTALL_PROGRESS_KEY);
         var arr = raw ? JSON.parse(raw) : [];
         return Array.isArray(arr) ? arr : [];
       } catch (e) { return []; }
     }
-    function saveProgress(kind, idxArr) {
-      try { window.localStorage.setItem(installProgressKey(kind), JSON.stringify(idxArr)); } catch (e) { /* private/blocked storage — checklist still works, just won't persist */ }
+    function saveProgress(idxArr) {
+      try { window.localStorage.setItem(INSTALL_PROGRESS_KEY, JSON.stringify(idxArr)); } catch (e) { /* private/blocked storage — checklist still works, just won't persist */ }
     }
-    function openInstallSteps(kind) {
-      var steps = installSteps(kind);
+    function openInstallSteps() {
+      var steps = installSteps();
       var checkedIdx = {};
-      loadProgress(kind).forEach(function (i) { checkedIdx[i] = true; });
+      loadProgress().forEach(function (i) { checkedIdx[i] = true; });
 
       var overlay = document.createElement("div");
       overlay.className = "extInstallOverlay";
@@ -2110,7 +2090,7 @@
       overlay.innerHTML =
         '<div class="extInstallCard">' +
         '<button type="button" class="extInstallClose" aria-label="Close">&times;</button>' +
-        '<div class="extInstallTitle">' + (kind === "mac" ? "Installing on Mac" : "Installing on Windows") + "</div>" +
+        '<div class="extInstallTitle">Installing the extension</div>' +
         '<div class="extInstallSub">Follow these steps once the download above finishes. Check each one off as you go — your progress is saved on this computer, so it’s still here if you close this and come back.</div>' +
         '<ol class="extInstallSteps">' + stepsHtml + "</ol>" +
         '<div class="extInstallProgress"><span class="extInstallProgressText"></span> · <button type="button" class="extInstallReset">Reset checklist</button></div>' +
@@ -2130,7 +2110,7 @@
         Array.prototype.forEach.call(overlay.querySelectorAll(".extInstallSteps input[type=checkbox]:checked"), function (cb) {
           idxs.push(Number(cb.getAttribute("data-idx")));
         });
-        saveProgress(kind, idxs);
+        saveProgress(idxs);
       }
 
       Array.prototype.forEach.call(overlay.querySelectorAll(".extInstallSteps input[type=checkbox]"), function (cb) {
@@ -2149,7 +2129,7 @@
           if (li) li.classList.remove("done");
         });
         refreshProgressText();
-        saveProgress(kind, []);
+        saveProgress([]);
       });
 
       function close() {
@@ -2167,35 +2147,24 @@
 
     function renderExtensionDownload() {
       var repo = (CONFIG.extensionRepo || "").trim();
-      var macAsset = (CONFIG.extensionMacAsset || "").trim();
-      var winAsset = (CONFIG.extensionWindowsAsset || "").trim();
+      var asset = (CONFIG.extensionAsset || "").trim();
       if (!repo) {
-        els.extDownloadWrap.innerHTML = '<div class="hint">Set <span class="mono">extensionRepo</span> in CJT_CONFIG (e.g. "your-org/cjt-ops-dashboard") to show download buttons here.</div>';
+        els.extDownloadWrap.innerHTML = '<div class="hint">Set <span class="mono">extensionRepo</span> in CJT_CONFIG (e.g. "your-org/cjt-ops-dashboard") to show the download button here.</div>';
         return;
       }
-      var os = detectOS();
-      var macBtn = macAsset
-        ? '<a class="btn primary" data-os="mac" href="' + esc(releaseAssetUrl(repo, macAsset)) + '" target="_blank" rel="noopener noreferrer" download>Download for Mac</a>'
-        : '<button type="button" class="btn" disabled>Download for Mac (not published yet)</button>';
-      var winBtn = winAsset
-        ? '<a class="btn primary" data-os="windows" href="' + esc(releaseAssetUrl(repo, winAsset)) + '" target="_blank" rel="noopener noreferrer" download>Download for Windows</a>'
-        : '<button type="button" class="btn" disabled title="A Windows build is planned but not built yet">Download for Windows (coming soon)</button>';
-      var buttons = os === "windows" ? [winBtn, macBtn] : [macBtn, winBtn];
-      var osNote =
-        os === "mac" ? "Looks like you're on a Mac — that's the one to use. "
-        : os === "windows" ? "Looks like you're on Windows — that's the one to use. "
-        : "";
+      var btn = asset
+        ? '<a class="btn primary" id="extDownloadBtn" href="' + esc(releaseAssetUrl(repo, asset)) + '" target="_blank" rel="noopener noreferrer" download>Download the extension</a>'
+        : '<button type="button" class="btn" disabled>Download the extension (not published yet)</button>';
       els.extDownloadWrap.innerHTML =
-        '<div class="btnRow">' + buttons.join("") + "</div>" +
-        '<div class="hint" style="margin-top:10px;">' + osNote +
-        "Click a button to start the download — a step-by-step install checklist pops up here right away to walk you through the rest. This button only starts the download; the actual install still happens on that computer, same as any other desktop software." +
+        '<div class="btnRow">' + btn + "</div>" +
+        '<div class="hint" style="margin-top:10px;">Same download for Mac, Windows, and Linux — works in Chrome, Edge, Brave, or Vivaldi. ' +
+        "Click to start the download — a step-by-step install checklist pops up here right away to walk you through the rest (it's just unzip and load it in the browser, no installer). This button only starts the download; the checklist covers the rest." +
         "</div>";
       // Don't preventDefault on click — the browser's own download must
       // still fire normally. This only opens the on-page checklist for
       // what to do once that download lands.
-      Array.prototype.forEach.call(els.extDownloadWrap.querySelectorAll("a.btn[data-os]"), function (a) {
-        a.addEventListener("click", function () { openInstallSteps(a.getAttribute("data-os")); });
-      });
+      var a = els.extDownloadWrap.querySelector("#extDownloadBtn");
+      if (a) a.addEventListener("click", function () { openInstallSteps(); });
     }
     renderExtensionDownload();
 
