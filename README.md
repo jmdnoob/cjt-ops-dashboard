@@ -35,7 +35,9 @@ builder as Custom HTML, that call GHL's REST API directly from the browser.
   importer. Generates the exact snippet to paste into both pages, tests the
   GHL connection, and reconciles AAA pay statements against Dispatch
   Opportunities by Work Order Number, same matching logic as the existing
-  `AAA-GHL-Extractor` tool's `import_aaa_payments.py`.
+  `AAA-GHL-Extractor` tool's `import_aaa_payments.py`. Also owns the rate
+  engine (services/rate tables/business accounts — see "Rate engine" below)
+  — it's the only file that writes to those three objects.
 
 ## Setting up a new client
 
@@ -113,17 +115,73 @@ Maintenance, Training) already work unchanged on a new client's sub-account,
 same snapshot, no config beyond the token/Location ID and confirming the
 pipeline name in Setup.
 
-On Apply, each row writes to **two places**:
-1. The matched Opportunity's own AAA custom fields (AAA Payment ID, AAA Gross
-   Paid Amount, AAA Pay Date, AAA Paid Tow Miles, AAA Payment Difference) —
-   same fields `import_aaa_payments.py` already writes, so nothing that
-   depends on those fields breaks.
-2. A new record in the `aaa_payments` custom object (`aaa_payment_id`,
-   `work_order_number`, `gross_paid_amount`, `expected_tow_amount`,
-   `payment_difference_value`, `reconciliation_status`, `exception_reason`) —
-   this is what `dashboard.js`'s "AAA Payments" section actually reads, and it
-   captures unmatched/exception rows too, which the Opportunity-only approach
-   can't (there's no Opportunity to write to for an unmatched Work Order).
+On Apply, each row writes to the matched Opportunity's own AAA custom fields
+(AAA Payment ID, AAA Gross Paid Amount, AAA Pay Date, AAA Paid Tow Miles, AAA
+Payment Difference) — same fields `import_aaa_payments.py` already writes.
+That's the only write (see the REMOVED note at the top of `setup.js`: AAA
+payment data used to also mirror into a separate `aaa_payments` Custom
+Object, deleted on purpose 2026-10-13 — it belongs on the Opportunity only).
+A statement row with no matching Opportunity ("no match") has nowhere to go
+and is reported in the Preview summary only, same as a no-op in the Python
+tool.
+
+## Rate engine (Setup page, section 8)
+
+What a job costs, modeled directly on a real working reference rather than
+invented fresh: the same `services` + `rate_tables` shape (and the same
+`compute_expected_amount` formula) as HookOps' own rates module
+(`app/routes/rates.py`, `app/biz.py`) — the software this whole build is
+patterned on. Three new Custom Objects:
+
+- **`rate_tables`** — Name, Effective Date, Is Current, Base Fee, Per Mile
+  Rate, Included Miles (free before per-mile billing starts), Minimum Fee,
+  After-Hours Pct, Flatbed Surcharge, Rounding (ceiling/nearest/none). Only
+  one table is ever "current" — that's the one new jobs get priced against.
+  A job keeps whichever table was current when it was created (stamped onto
+  its own **Rate Table Used** field, a new field on the Opportunity, set at
+  creation time — see "What still needs testing" below for who sets this,
+  since the compiled extractor can't be changed from this repo), so changing
+  a rate later never touches a job already priced. Reduces to exactly
+  today's $85 + $3/mi formula when every extra field is left at zero.
+- **`services`** — Name, Category, Unit (flat/per_mile/per_hour/per_day/
+  per_unit), Active, Price. What kind of job it is; each can carry its own
+  price, read off the Opportunity's **Service Type** field (also new).
+  Optional — the base fee/mileage rate above work fine with zero services.
+- **`business_accounts`** — Name, Type, Default Rate Table, Billing Contact,
+  Payment Terms, Notes. Matches the *existing* Dispatch Source field
+  (AAA/Private) **by name** rather than adding a third new Opportunity
+  field — "Set up rate engine" seeds one named "AAA" and one named "Private"
+  automatically, both pointing at the seeded rate table.
+
+**Not ported from HookOps, because CJT doesn't need it the way the reference
+app's multi-tenant version does**: HookOps keeps service prices in a
+separate join table so one service can price differently across several
+*simultaneous* rate tables; CJT only ever has one current table, so each
+service just carries its own price directly. Flatbed Surcharge is new too —
+HookOps treats flatbed as a *truck* attribute, not a pricing input, and
+doesn't charge for it anywhere. Starts at $0, so it changes nothing until a
+real number is set. After-Hours Pct is carried on `rate_tables` matching
+HookOps' own schema, but HookOps' `compute_expected_amount` never actually
+reads it either — applying it here as a flat percentage markup on the whole
+computed total is this repo's own interpretation of what the field is for,
+not something proven against a working reference.
+
+**"Set up rate engine" is idempotent** — safe to click more than once; it
+checks before creating anything, and only seeds the first rate table/
+accounts on the very first run (skipped if any `rate_tables` record already
+exists, so it never re-seeds over real data).
+
+**Dashboard-side, read-only**: `dashboard.js`'s AAA Payments tab adds a "Rate
+engine says" column next to the existing Expected/Diff columns — what the
+rate engine computes a job *should* cost from its Rate Table Used/Service
+Type/Flatbed Required/Tow Miles, flagged when it disagrees with whatever the
+extractor actually wrote as Expected Tow Amount. This is diagnostic only: it
+does **not** change the existing AAA Payment Difference write, which still
+compares Gross Paid against the Opportunity's own stored Expected Tow
+Amount, exactly as before. The extractor (`native-host/src/main.go`, a
+compiled binary) can't be updated from this repo to use the richer formula
+at job-creation time, so this column is how a mismatch becomes visible
+without silently rewriting a financial field nobody asked to change yet.
 
 ## The AAA Work Order Extractor extension (bundled, downloaded from here)
 
@@ -155,11 +213,33 @@ update; the button and every client's pasted snippet never change.
 `extensionRepo` defaults to this repo (`jmdnoob/cjt-ops-dashboard`) but can
 be overridden per deployment via `CJT_CONFIG.extensionRepo` (e.g. a
 reseller's own fork). A Windows build now ships too (2026-09-17) — attach
-`AAA-GHL-Extractor-Windows-v1.0.0.zip` to the same Release alongside the Mac
-zip; `setup.js`'s `DEFAULTS.extensionWindowsAsset` already points at that
-exact filename, so the Windows button activates as soon as the Release has
-that asset. Same "publish a new Release with the same asset filename to
-ship an update" rule applies to both platforms.
+`AAA-GHL-Extractor-Windows.zip` to the same Release alongside the Mac zip;
+`setup.js`'s `DEFAULTS.extensionWindowsAsset` already points at that exact
+filename, so the Windows button activates as soon as the Release has that
+asset. Same "publish a new Release with the same asset filename to ship an
+update" rule applies to both platforms — **both asset filenames are
+unversioned on purpose** (the Windows one was pinned to
+`...-v1.0.0.zip` until 2026-10-15, which meant a setup.js edit was needed
+for every single Windows update; fixed to match the Mac convention, so
+shipping either platform's update again is just "attach a zip with this
+exact name to a new Release," no code change, ever).
+
+**2026-10-15 fix — native host registered for one browser only.** Both the
+Mac and Windows installers originally wrote their native-messaging
+registration into Microsoft Edge's lookup location only (Mac:
+`~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/`;
+Windows: `HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\...`). Loading
+the extension into any OTHER browser (Chrome especially, since that's what
+most people actually use) showed "Native host unavailable (Specified
+native messaging host not found.)" in the popup — a correctly-run install
+that simply couldn't be found by the browser it was loaded into. Fixed in
+both installers (Mac `AAA-GHL-Extractor-Mac.zip`, Windows
+`AAA-GHL-Extractor-Windows.zip`) to register the same manifest under
+Chrome's, Edge's, Brave's, and Vivaldi's own lookup locations; Opera needs
+nothing extra since it reads Chrome's registration instead of maintaining
+its own (confirmed via Opera's own forum). `setup.js`'s install checklist
+text was updated to match — it no longer tells people to specifically look
+for Edge.
 
 **The extension's own field-ID bug (fixed 2026-09-17).** The native bridge
 (`native-host/src/main.go`) had the exact same class of bug `setup.js` had:
@@ -241,6 +321,25 @@ not against live traffic. Before relying on this in front of a client:
       return complete `customFields` (confirmed by the existing Python tool's
       own docstring). This is fine for a small towing company's pipeline but
       hasn't been timed at scale.
+- [ ] Rate engine (section 8, 2026-10-15) — click "Set up rate engine" once
+      against a real token and read what it reports before relying on any of
+      this in front of a client:
+  - [ ] The object/field *creation* calls (`ensureObjectSchema`,
+        `ensureObjectField`, `ensureOpportunityField`) have never been run
+        live — written against GHL's documented Objects v3 shape, same
+        confidence level as everything else in this checklist, not more.
+  - [ ] Nothing in this repo sets the new **Service Type** / **Rate Table
+        Used** fields on an Opportunity at job-creation time — that's the
+        extractor's job (`native-host/src/main.go`, a compiled binary not in
+        this repo), and it hasn't been updated to do so. Until it is, every
+        job keeps showing "—" in the dashboard's "Rate engine says" column
+        (no Rate Table Used on file), which is the correct, safe state, not
+        a bug — it just means the recompute diagnostic has nothing to check
+        yet for jobs created by the extractor as it exists today.
+  - [ ] Confirm `MONETORY`/`NUMERICAL`/`CHECKBOX`/`SINGLE_OPTIONS` are
+        accepted as Custom Object field `dataType` values on a real token —
+        spelled and cased exactly as GHL's own docs give them, not
+        independently re-verified live.
 
 ## Not yet built
 
@@ -256,3 +355,12 @@ not against live traffic. Before relying on this in front of a client:
   by-name field resolution in both this repo and the extension's native
   host has only been verified against realistic fixture data that
   *simulates* a second sub-account's regenerated field IDs, not a real one.
+- The extractor (`native-host/src/main.go`) setting **Service Type** / **Rate
+  Table Used** on a new Opportunity at creation time, and picking a rate
+  table by Business Account / choosing a service-specific price — the rate
+  engine (section 8) is fully built and live on the GHL/dashboard side, but
+  the compiled extractor still only ever writes the plain base+mileage
+  formula, since it's a separate binary this repo can't rebuild. Until the
+  extractor's own source is available to update, new jobs won't have a Rate
+  Table Used on file, and the dashboard's "Rate engine says" column has
+  nothing to compare against — not a bug, just the current ceiling.

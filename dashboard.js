@@ -16,7 +16,8 @@
  *       dispatchPipelineName: "Towing Dispatch",        // must match exactly
  *       baseTowRate: 85,
  *       mileageRate: 3,
- *       setupUrl: "https://THEIRDOMAIN.com/setup"       // where "Setup" footer link goes
+ *       setupUrl: "https://THEIRDOMAIN.com/setup",      // where "Setup" footer link goes
+ *       onboardingUrl: "https://THEIRDOMAIN.com/driver-onboarding" // driver-onboarding.js's page
  *     };
  *   </script>
  *   <script src="https://cdn.jsdelivr.net/gh/YOUR_GH_ORG/cjt-ops-dashboard@main/dashboard.js"></script>
@@ -57,6 +58,10 @@
     baseTowRate: 85,
     mileageRate: 3,
     setupUrl: "",
+    // Page URL for driver-onboarding.js's fill-out tool (Drivers + Training
+    // Records). Leave unset to hide the "Fill Out Onboarding/Training ↗"
+    // buttons/links in the Drivers section — they only render when this is set.
+    onboardingUrl: "",
     objectKeys: {
       drivers: "driver_profiles",
       fleet: "trucks",
@@ -66,6 +71,13 @@
       // No "aaa" key — AAA payment data lives on the Opportunity's own
       // custom fields now, not a Custom Object (removed 2026-10-13; see
       // loadAaa()/mapAaaFromOpportunity() below).
+      // Rate engine (2026-10-15) — see setup.js's own objectKeys comment
+      // for why these are Custom Objects and not a duplicate-data violation
+      // of the rule above. Read-only here; setup.js's "8. Rates & Services"
+      // tab is the only place that writes to them.
+      rateTables: "rate_tables",
+      services: "services",
+      businessAccounts: "business_accounts",
     },
     // Per-endpoint API "Version" header. GHL versions endpoints independently;
     // these are the values last confirmed against GHL's own docs/captured
@@ -94,6 +106,17 @@
 
   function ghlUrl(path) {
     return CONFIG.ghlBase + "/v2/location/" + CONFIG.locationId + path;
+  }
+
+  // Link out to driver-onboarding.js's fill-out tool, optionally
+  // preselecting a driver record so a "Fill Out ↗" link from this
+  // dashboard's Drivers tables opens straight into that driver's form
+  // (see driver-onboarding.js's driverIdFromQuery()). Returns "" when
+  // CONFIG.onboardingUrl isn't set, so callers can hide the link entirely.
+  function onboardingUrl(driverRecordId) {
+    if (!CONFIG.onboardingUrl) return "";
+    var sep = CONFIG.onboardingUrl.indexOf("?") === -1 ? "?" : "&";
+    return driverRecordId ? CONFIG.onboardingUrl + sep + "driverId=" + encodeURIComponent(driverRecordId) : CONFIG.onboardingUrl;
   }
 
   // ---------------------------------------------------------------------
@@ -222,6 +245,13 @@
     // this same constant for why (the field's been deleted/recreated under
     // a new ID more than once; only the by-name lookup below is durable).
     aaaPaymentDifference: [],
+    // Read-only rate-engine inputs (2026-10-15) — see computeExpectedAmount/
+    // mapAaaFromOpportunity below. No fallback IDs for any of these, same
+    // reasoning as setup.js's own copy of this comment.
+    towMiles: [],
+    flatbedRequired: [],
+    serviceType: [],
+    rateTableUsed: [],
   };
   var FIELD_NAME_CANDIDATES = {
     workOrderNumber: ["work order number"],
@@ -230,6 +260,10 @@
     aaaGrossPaid: ["aaa gross paid amount"],
     aaaPayDate: ["aaa pay date"],
     aaaPaymentDifference: ["aaa payment difference"],
+    towMiles: ["tow miles"],
+    flatbedRequired: ["flatbed required", "flatbed"],
+    serviceType: ["service type"],
+    rateTableUsed: ["rate table used"],
   };
   var resolvedFields = null;
 
@@ -306,6 +340,64 @@
     return isNaN(n) ? null : n;
   }
 
+  // ---------------------------------------------------------------------
+  // Rate engine (2026-10-15) — read-only mirror of setup.js's own
+  // computeExpectedAmount/rate_tables/services (see that file's "8. Rates
+  // & Services" section for the full design rationale). This dashboard
+  // never writes to rate_tables/services/business_accounts — only setup.js
+  // does — it just uses them to show what a job SHOULD cost next to
+  // whatever Expected Tow Amount the extractor already wrote, so a
+  // mismatch (extractor used the plain base+mileage formula; this job
+  // actually had a priced service or needed a flatbed) is visible here
+  // without silently rewriting anything. See mapAaaFromOpportunity().
+  // ---------------------------------------------------------------------
+  function computeExpectedAmount(towMiles, rateTableRow, servicePrice, flatbedRequired, isAfterHours) {
+    var rt = rateTableRow || { baseFee: CONFIG.baseTowRate, perMileRate: CONFIG.mileageRate, includedMiles: 0, minimumFee: 0, afterHoursPct: 0, flatbedSurcharge: 0, rounding: "ceiling" };
+    var included = parseFloat(rt.includedMiles) || 0;
+    var perMile = parseFloat(rt.perMileRate) || 0;
+    var base = parseFloat(rt.baseFee) || 0;
+    var minimum = parseFloat(rt.minimumFee) || 0;
+    var afterHoursPct = parseFloat(rt.afterHoursPct) || 0;
+    var flatbedSurcharge = parseFloat(rt.flatbedSurcharge) || 0;
+    var billableMiles = Math.max(0, (parseFloat(towMiles) || 0) - included);
+    if (rt.rounding === "nearest") billableMiles = Math.round(billableMiles);
+    else if (rt.rounding !== "none") billableMiles = Math.ceil(billableMiles);
+    var amount = base + billableMiles * perMile + (parseFloat(servicePrice) || 0);
+    if (flatbedRequired) amount += flatbedSurcharge;
+    if (isAfterHours && afterHoursPct) amount = amount * (1 + afterHoursPct / 100);
+    if (minimum && amount < minimum) amount = minimum;
+    return Math.round(amount * 100) / 100;
+  }
+
+  // Loaded once per page load (not per render) — rate_tables/services
+  // change rarely, and re-fetching them on every row would mean one
+  // extra pair of API calls per AAA row instead of two for the whole tab.
+  var rateEngineCache = null; // { rateTablesByName: {}, servicesByName: {} } once loaded
+  var rateEngineCachePromise = null;
+  function loadRateEngineCache() {
+    if (rateEngineCache) return Promise.resolve(rateEngineCache);
+    if (rateEngineCachePromise) return rateEngineCachePromise;
+    rateEngineCachePromise = Promise.all([
+      loadAllObjectRecords(CONFIG.objectKeys.rateTables).catch(function () { return []; }),
+      loadAllObjectRecords(CONFIG.objectKeys.services).catch(function () { return []; }),
+    ]).then(function (results) {
+      var rateTablesByName = {};
+      (results[0] || []).forEach(function (r) {
+        var p = r.properties || {};
+        rateTablesByName[p.name] = {
+          baseFee: p.base_fee, perMileRate: p.per_mile_rate, includedMiles: p.included_miles,
+          minimumFee: p.minimum_fee, afterHoursPct: p.after_hours_pct, flatbedSurcharge: p.flatbed_surcharge,
+          rounding: p.rounding,
+        };
+      });
+      var servicesByName = {};
+      (results[1] || []).forEach(function (r) { var p = r.properties || {}; servicesByName[p.name] = propVal(p.price); });
+      rateEngineCache = { rateTablesByName: rateTablesByName, servicesByName: servicesByName };
+      return rateEngineCache;
+    });
+    return rateEngineCachePromise;
+  }
+
   // GHL's REST API needs a custom object's schemaKey fully qualified as
   // "custom_objects.<key>" in the URL path (confirmed 2026-09-17 against a
   // real location's GET /objects/ listing — a bare key like "trucks" is
@@ -344,18 +436,75 @@
   }
 
   // ---------------------------------------------------------------------
+  // Dropdown (SINGLE_OPTIONS) key -> label lookups. CONFIRMED (2026-10-13,
+  // live create+delete test) -- GHL stores/returns a SINGLE_OPTIONS field's
+  // selected OPTION KEY in record.properties, never its label, so anything
+  // that displays these fields has to translate back through the exact
+  // option keys this session created them with (driver-onboarding.js writes
+  // through the same table, so the two always agree).
+  var DOC_STATUS_LABELS = { on_file: "On File", missing: "Missing", expired: "Expired" };
+  var TRAINING_CHECKLIST = [
+    ["equipment", "Equipment", ["Straps and Ratchets", "Jack", "4 Way Tire Iron", "Skates", "CV Axel Skate", "Bridle", "Snatch Block", "Jump box", "Lockout Kit"]],
+    ["truck_familiarization", "Truck Familiarization", ["Beacon/Lights", "Air ride", "Loading", "Securing Vehicle", "Towing", "Unloading", "Broken Axel Loading", "Broken Axel Unloading", "Snatch Block Loading"]],
+    ["stuck_in_park_tow_methods", "Stuck in Park Tow Methods", ["Shift lock Release", "Skates", "Reverse Winch"]],
+    ["call_management", "Call Management", ["Download dispatching app", "Enable proper app setting", "Enter driver credentials", "Select Truck", "View Call Details", "Update Status", "Document Call", "Take photos", "Clear call", "Refresh App", "Logout"]],
+  ];
+  function slugify(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""); }
+  var CATEGORY_LABELS = {};
+  var TRAINING_ITEM_LABELS = {};
+  TRAINING_CHECKLIST.forEach(function (c) {
+    CATEGORY_LABELS[c[0]] = c[1];
+    c[2].forEach(function (item) { TRAINING_ITEM_LABELS[c[0] + "__" + slugify(item)] = c[1] + ": " + item; });
+  });
+  var DRIVER_OPTION_LABELS = {
+    onboarding_status: { onboarding: "Onboarding", active: "Active", suspended: "Suspended" },
+    on_duty: { yes: "Yes", no: "No" },
+    pay_type: { commission: "Commission", hourly: "Hourly" },
+    employment_type: { full_time: "Full-Time", part_time: "Part-Time", weekend: "Weekend" },
+    license_status: DOC_STATUS_LABELS,
+    insurance_status: DOC_STATUS_LABELS,
+    mvr_status: DOC_STATUS_LABELS,
+    certification_status: DOC_STATUS_LABELS,
+    training_status: { not_started: "Not Started", in_progress: "In Progress", complete: "Complete" },
+  };
+  var TRAINING_OPTION_LABELS = {
+    category: CATEGORY_LABELS,
+    training_item: TRAINING_ITEM_LABELS,
+    result: { pending: "Pending", pass: "Pass", fail: "Fail" },
+  };
+  function optLabel(table, key) { return (key && table[key]) || key; }
+
+  // ---------------------------------------------------------------------
   // Property mappers: GHL record -> the row shape the existing UI expects
   // ---------------------------------------------------------------------
+  // Field set as actually built in GHL (2026-10-13) under the "Drivers"
+  // object (custom_objects.driver_profiles), across its Profile / Onboarding
+  // Documents / Training folders. `status`/`type` are kept as aliases for
+  // onboardingStatus/employmentType so the existing "At a Glance" active/out
+  // summary (which reads r.status / r.type) keeps working unchanged.
   function mapDriver(rec) {
     var p = rec.properties || {};
+    var onboardingStatus = optLabel(DRIVER_OPTION_LABELS.onboarding_status, p.onboarding_status);
+    var employmentType = optLabel(DRIVER_OPTION_LABELS.employment_type, p.employment_type);
     return {
       recordId: rec.id,
       name: p.driver_name,
-      driverId: p.driver_id,
-      status: p.employment_status,
-      type: p.employment_type,
-      hireDate: p.hire_date,
       email: p.email,
+      phone: p.phone,
+      onboardingStatus: onboardingStatus,
+      status: onboardingStatus,
+      onDuty: optLabel(DRIVER_OPTION_LABELS.on_duty, p.on_duty),
+      payType: optLabel(DRIVER_OPTION_LABELS.pay_type, p.pay_type),
+      commissionPct: propVal(p.commission_pct),
+      employmentType: employmentType,
+      type: employmentType,
+      assignedTruck: p.assigned_truck,
+      licenseStatus: optLabel(DRIVER_OPTION_LABELS.license_status, p.license_status),
+      insuranceStatus: optLabel(DRIVER_OPTION_LABELS.insurance_status, p.insurance_status),
+      mvrStatus: optLabel(DRIVER_OPTION_LABELS.mvr_status, p.mvr_status),
+      certificationStatus: optLabel(DRIVER_OPTION_LABELS.certification_status, p.certification_status),
+      trainingStatus: optLabel(DRIVER_OPTION_LABELS.training_status, p.training_status),
+      trainingProgress: p.training_progress,
     };
   }
 
@@ -391,16 +540,29 @@
     };
   }
 
+  // Training Records = CJT's real "Driver Training Checklist and Signoff"
+  // form, one row per driver per training item (built live in GHL
+  // 2026-10-13; 32 items across 4 categories). CONFIRMED (2026-10-13, live
+  // create+delete test) -- GHL returns a SINGLE_OPTIONS field's option KEY
+  // in record.properties, not its label, so category/training_item/result
+  // are translated through TRAINING_OPTION_LABELS above.
   function mapTraining(rec) {
     var p = rec.properties || {};
+    var item = optLabel(TRAINING_OPTION_LABELS.training_item, p.training_item);
+    var result = optLabel(TRAINING_OPTION_LABELS.result, p.result);
     return {
       recordId: rec.id,
-      id: p.training_id,
       driver: p.driver_name,
-      title: p.training_title,
-      type: p.training_type,
-      date: p.training_date,
-      status: p.status,
+      category: optLabel(TRAINING_OPTION_LABELS.category, p.category),
+      item: item,
+      title: item,
+      dateCovered: p.date_covered,
+      date: p.date_covered,
+      traineeInitials: p.trainee_initials,
+      trainerInitials: p.trainer_initials,
+      result: result,
+      status: result,
+      comments: p.comments,
     };
   }
 
@@ -449,6 +611,33 @@
     // exception needing attention, same meaning as before — just evaluated
     // against the Opportunity's current state instead of a frozen snapshot.
     var status = !hasPayment ? null : (expected != null ? "matched" : "exception");
+
+    // Rate-engine recompute (2026-10-15) — diagnostic only, never used for
+    // status/diff above: this job's Expected Tow Amount was written by the
+    // extractor at creation time using whatever the plain base+mileage
+    // formula gave it. If this job also has a Rate Table Used stamped on
+    // it (meaning it was created after the rate engine existed) and a Tow
+    // Miles value, recompute what it SHOULD cost from the actual rate
+    // table/service/flatbed on file and surface a mismatch — the extractor
+    // can't be changed from here (compiled native host, see setup.js's own
+    // notes), so this is the one place that can catch "this job needed a
+    // priced service or a flatbed and the stored number doesn't reflect
+    // it" without silently rewriting anything.
+    var recomputedExpected = null;
+    var rateTableUsedName = getCustomField(o, fieldIdsFor("rateTableUsed"));
+    var towMilesVal = parseMoney(getCustomField(o, fieldIdsFor("towMiles")));
+    if (rateEngineCache && rateTableUsedName && towMilesVal != null) {
+      var rt = rateEngineCache.rateTablesByName[rateTableUsedName];
+      if (rt) {
+        var svcName = getCustomField(o, fieldIdsFor("serviceType"));
+        var svcPrice = svcName ? rateEngineCache.servicesByName[svcName] : 0;
+        var flatbedVal = getCustomField(o, fieldIdsFor("flatbedRequired"));
+        var flatbedOn = flatbedVal === true || flatbedVal === "true" || flatbedVal === "Yes" || flatbedVal === "yes";
+        recomputedExpected = computeExpectedAmount(towMilesVal, rt, svcPrice, flatbedOn);
+      }
+    }
+    var recomputeMismatch = recomputedExpected != null && expected != null && Math.abs(recomputedExpected - expected) >= 0.01;
+
     return {
       recordId: o.id,
       contactId: o.contactId,
@@ -458,6 +647,8 @@
       gross: gross,
       expected: expected,
       diff: diff,
+      recomputedExpected: recomputedExpected,
+      recomputeMismatch: recomputeMismatch,
       reason: !hasPayment ? null
         : expected == null ? "No Expected Tow Amount on file yet."
         : diff > 0 ? "Overpaid by AAA"
@@ -579,7 +770,13 @@
   // mirrored into the Custom Object. It's still visible at import time in
   // Setup's own Preview table; it just isn't persisted anywhere after that.
   function loadAaa() {
-    return loadDispatchOpportunities().then(function (d) {
+    // Rate-engine cache loads in parallel with the opportunities fetch —
+    // mapAaaFromOpportunity() reads rateEngineCache (module-level) and
+    // degrades to recomputedExpected: null when it's not loaded yet or a
+    // given job has no Rate Table Used on it, so this never blocks the
+    // rest of the tab on the rate engine existing.
+    return Promise.all([loadDispatchOpportunities(), loadRateEngineCache().catch(function () { return null; })]).then(function (results) {
+      var d = results[0];
       var rows = d.opps.map(mapAaaFromOpportunity).filter(function (r) { return r.hasPayment; });
       var statusCounts = {};
       var missingWo = 0;
@@ -920,7 +1117,14 @@
     var LINK_FNS = {
       dispatch: function (r) { return r.contactId ? ghlUrl("/contacts/detail/" + r.contactId) : null; },
       fleet: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.fleet + "/list?recordId=" + r.recordId) : LIST_URLS.fleet; },
-      drivers: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.drivers + "/list?recordId=" + r.recordId) : LIST_URLS.drivers; },
+      // Clicking a driver row opens the driver-onboarding.js fill-out tool
+      // pre-loaded to that driver (so staff land on the form, not a raw GHL
+      // object-record page) whenever CONFIG.onboardingUrl is set; falls back
+      // to the plain GHL record link otherwise.
+      drivers: function (r) {
+        if (r.recordId && CONFIG.onboardingUrl) return onboardingUrl(r.recordId);
+        return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.drivers + "/list?recordId=" + r.recordId) : LIST_URLS.drivers;
+      },
       quarters: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.quarters + "/list?recordId=" + r.recordId) : LIST_URLS.quarters; },
       training: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.training + "/list?recordId=" + r.recordId) : LIST_URLS.training; },
       maintenance: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.maintenance + "/list?recordId=" + r.recordId) : LIST_URLS.maintenance; },
@@ -1349,6 +1553,18 @@
         { label: "Expected", render: function (r) { return money(r.expected); } },
         { label: "Diff", render: function (r) { return money(r.diff); } },
         { label: "Reason", render: function (r) { return esc(r.reason); } },
+        // Diagnostic only (see mapAaaFromOpportunity's own comment) — what
+        // the rate engine says this job should cost, from its Rate Table
+        // Used/Service Type/Flatbed Required/Tow Miles, next to whatever
+        // the extractor actually wrote as Expected Tow Amount above. Blank
+        // for any job created before the rate engine existed (no Rate
+        // Table Used on file) — never a sign of a problem by itself.
+        { label: "Rate engine says", render: function (r) {
+          if (r.recomputedExpected == null) return '<span style="color:var(--text-dim)">—</span>';
+          return r.recomputeMismatch
+            ? '<span class="status-pill status-exception">' + money(r.recomputedExpected) + "</span>"
+            : money(r.recomputedExpected);
+        } },
       ];
       var linkFn = LINK_FNS.aaa;
       sectionBodyEl.innerHTML =
@@ -1362,15 +1578,19 @@
       var d = state.drivers || {};
       var cols = [
         { label: "Name", render: function (r) { return esc(r.name); } },
-        { label: "Driver ID", render: function (r) { return '<span class="mono">' + esc(r.driverId) + "</span>"; } },
-        { label: "Status", render: function (r) { return pill(r.status); } },
-        { label: "Type", render: function (r) { return esc(r.type); } },
-        { label: "Hire date", render: function (r) { return dateOnly(r.hireDate); } },
+        { label: "Status", render: function (r) { return pill(r.onboardingStatus); } },
+        { label: "Type", render: function (r) { return esc(r.employmentType); } },
+        { label: "Pay", render: function (r) { return esc(r.payType) + (r.commissionPct ? " (" + r.commissionPct + "%)" : ""); } },
+        { label: "Truck", render: function (r) { return esc(r.assignedTruck); } },
+        { label: "Training", render: function (r) { return pill(r.trainingStatus) + (r.trainingProgress ? " " + esc(r.trainingProgress) : ""); } },
         { label: "Email", render: function (r) { return esc(r.email); } },
+        { label: "Phone", render: function (r) { return esc(r.phone); } },
       ];
       var head = panelHead(
-        '<span class="live-tag">● Live</span> — Driver Profile custom object in GHL, ' + (d.total || 0) + " on file.",
-        [{ label: "Open in GHL ↗", url: LIST_URLS.drivers }, { label: "+ Add Driver ↗", url: LIST_URLS.drivers, primary: true }]
+        '<span class="live-tag">● Live</span> — Drivers custom object in GHL, ' + (d.total || 0) + " on file. Click a driver to fill out their profile, documents, and training.",
+        CONFIG.onboardingUrl
+          ? [{ label: "Open in GHL ↗", url: LIST_URLS.drivers }, { label: "+ Add Driver ↗", url: onboardingUrl(), primary: true }]
+          : [{ label: "Open in GHL ↗", url: LIST_URLS.drivers }, { label: "+ Add Driver ↗", url: LIST_URLS.drivers, primary: true }]
       );
       mountSearch(sectionBodyEl, { columns: cols, rows: d.records || [], linkFn: LINK_FNS.drivers, placeholder: "Search drivers…", headHtml: head });
     }
@@ -1407,15 +1627,19 @@
     function bodyDriversTraining() {
       var d = state.training || {};
       var cols = [
-        { label: "Record", render: function (r) { return '<span class="mono">' + esc(r.id) + "</span>"; } },
         { label: "Driver", render: function (r) { return esc(r.driver); } },
-        { label: "Title", render: function (r) { return esc(r.title); } },
-        { label: "Type", render: function (r) { return esc(r.type); } },
-        { label: "Date", render: function (r) { return dateOnly(r.date); } },
-        { label: "Status", render: function (r) { return pill(r.status); } },
+        { label: "Category", render: function (r) { return esc(r.category); } },
+        { label: "Item", render: function (r) { return esc(r.item); } },
+        { label: "Date Covered", render: function (r) { return dateOnly(r.dateCovered); } },
+        { label: "Trainee", render: function (r) { return esc(r.traineeInitials); } },
+        { label: "Trainer", render: function (r) { return esc(r.trainerInitials); } },
+        { label: "Result", render: function (r) { return pill(r.result); } },
       ];
+      var trainingActions = CONFIG.onboardingUrl
+        ? [{ label: "Open in GHL ↗", url: LIST_URLS.training }, { label: "Fill Out Training ↗", url: onboardingUrl(), primary: true }]
+        : [{ label: "Open in GHL ↗", url: LIST_URLS.training }];
       sectionBodyEl.innerHTML =
-        panelHead('<span class="live-tag">● Live</span> — Training Record custom object in GHL.', [{ label: "Open in GHL ↗", url: LIST_URLS.training }]) +
+        panelHead('<span class="live-tag">● Live</span> — Training Record custom object in GHL.', trainingActions) +
         buildTable(cols, d.records || [], LINK_FNS.training);
     }
 

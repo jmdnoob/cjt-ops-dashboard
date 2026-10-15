@@ -92,6 +92,20 @@
  *     take a few minutes on a pipeline this size — it GETs every
  *     Opportunity individually, same cost profile as the old pre-2026-10-08
  *     buildWoMap().
+ *   - ensureRateEngineSetup() / ensureObjectSchema() / ensureObjectField() /
+ *     ensureOpportunityField() ("8. Rates & Services", 2026-10-15) — object/
+ *     field *creation* calls, as opposed to the already-proven /objects/
+ *     .../records read/write calls everything else in this file reuses.
+ *     Written against GHL's documented Objects v3 shape, but never run
+ *     against a real token in this session. Click "Set up rate engine"
+ *     once against the real location and read what it reports (which
+ *     objects/fields got created vs. already existed) before trusting the
+ *     Rates & Services tables in front of a client — it's idempotent
+ *     (checks before creating), so re-clicking it to retry after a failure
+ *     is safe. afterHoursPct's actual effect on the total (a flat percent
+ *     markup on the whole computed amount) is this file's own
+ *     interpretation, not something ported from a working reference — see
+ *     computeExpectedAmount's own comment.
  * ============================================================================
  */
 (function () {
@@ -136,6 +150,15 @@
       quarters: "driver_quarters",
       // No "aaa" key — AAA payment data lives on the Opportunity only, not
       // in a Custom Object (see the REMOVED note at the top of this file).
+      //
+      // Rate engine (2026-10-15) — see "8. Rates & Services" below. These
+      // ARE reference/config data (like drivers/training above), not
+      // per-job data, so Custom Objects are the right fit — the "no
+      // duplicate object" rule only ever applied to AAA payment data living
+      // redundantly on both an Opportunity and a mirror object.
+      rateTables: "rate_tables",
+      services: "services",
+      businessAccounts: "business_accounts",
     },
     apiVersions: {
       pipelines: "v3",
@@ -187,6 +210,19 @@
     // "not found," it means the field's name changed or the token lacks
     // the Custom Fields scope — not that this fallback needs updating.
     aaaPaymentDifference: [],
+    // Read-only inputs to the rate-engine recompute (8. Rates & Services) —
+    // never written by this file. No fallback IDs for any of these:
+    // towMiles/flatbedRequired/dispatchSource already exist on CJ Taylor
+    // Towing's location (the extractor created them) but this file has
+    // never needed their IDs before now, so none were ever copied in;
+    // serviceType/rateTableUsed are new fields "Set up rate engine" below
+    // creates fresh, so there's no ID to fall back to until that's been run
+    // once.
+    towMiles: [],
+    flatbedRequired: [],
+    dispatchSource: [],
+    serviceType: [],
+    rateTableUsed: [],
   };
 
   // Candidate GHL field *names* to match, case/whitespace-insensitive, per
@@ -206,6 +242,18 @@
     aaaPayDate: ["aaa pay date"],
     aaaPaidTowMiles: ["aaa paid tow miles"],
     aaaPaymentDifference: ["aaa payment difference"],
+    towMiles: ["tow miles"],
+    flatbedRequired: ["flatbed required", "flatbed"],
+    // dispatchSource is read-only here (never written) — it already exists
+    // (AAA/Private) and doubles as the Business Account lookup key below,
+    // so "Set up rate engine" does NOT create a separate "Business Account"
+    // field; it just needs a Business Account record named exactly "AAA"
+    // and one named exactly "Private" to match this field's two values.
+    dispatchSource: ["dispatch source"],
+    // The 2 fields "Set up rate engine" (8. Rates & Services) creates on
+    // the Opportunity the first time it's run on a given location.
+    serviceType: ["service type"],
+    rateTableUsed: ["rate table used"],
   };
 
   // Filled in by resolveFieldIds() (called from "Test connection" and again
@@ -358,6 +406,297 @@
     }
 
     return attempt(0);
+  }
+
+  // ---------------------------------------------------------------------
+  // 8. Rate engine (2026-10-15) — rate_tables + services + business_accounts
+  // Custom Objects, modeled directly on HookOps' own rates module
+  // (app/routes/rates.py, app/biz.py:compute_expected_amount) rather than
+  // invented fresh: same 3-table shape (services / rate_tables / per-
+  // service prices), same job-level "which rate table was current when
+  // this was created" pinning so a later rate change never touches a job
+  // already priced, same base+per-mile-beyond-included-miles+service-price
+  // formula with a rounding rule and a minimum-fee floor.
+  //
+  // Two things are NOT copied from HookOps, because CJT doesn't need them
+  // the way the reference app's multi-tenant version does:
+  //   - HookOps keeps services/prices in a separate join table so one
+  //     service can price differently across several *simultaneous* rate
+  //     tables. CJT only ever has one current table at a time, so each
+  //     service record just carries its own `price` directly — simpler,
+  //     same result for a single-location business. If a second
+  //     concurrent table is ever needed, promote price to its own
+  //     per-table record then.
+  //   - Flatbed: HookOps doesn't price this at all (flatbed there is a
+  //     *truck* attribute, not a pricing input) — CJT's flatbedSurcharge
+  //     field is new, not ported. Starts at $0 so it changes nothing until
+  //     a real number is set.
+  //
+  // afterHoursPct is carried on rate_tables (matching HookOps' schema) but
+  // HookOps' own compute_expected_amount never actually reads it — it's an
+  // unused field there too. Applied here as a straight percentage markup
+  // on the whole computed amount, which is this file's own interpretation
+  // of what the field is for, not something proven against a working
+  // reference — worth confirming before relying on it for real money, same
+  // as any other judgment call a real contract detail should settle.
+  //
+  // UNVERIFIED, same caveat as everything else in this file's own header:
+  // the object/field *creation* calls below (ensureObjectSchema,
+  // ensureObjectField, ensureOpportunityField) have never been run against
+  // a real token in this session — ensureRateEngineSetup() needs to be run
+  // once against the real location and its result read carefully before
+  // trusting it in front of a client. The *record* read/write calls
+  // (listObjectRecords/createObjectRecord/updateObjectRecord) reuse the
+  // exact same /objects/:schemaKey/records shape dashboard.js and
+  // driver-onboarding.js already call live for driver_profiles/
+  // training_records, so those are on solid ground.
+  // ---------------------------------------------------------------------
+
+  var RATE_ENGINE_DEFAULTS = {
+    name: "Current",
+    effectiveDate: null, // filled in with today's date when created
+    isCurrent: true,
+    baseFee: 85,
+    perMileRate: 3,
+    includedMiles: 0,
+    minimumFee: 0,
+    afterHoursPct: 0,
+    flatbedSurcharge: 0,
+    rounding: "ceiling", // ceiling | nearest | none
+  };
+
+  // base + per-mile beyond included miles (rounded per the table's
+  // rounding rule) + the service's own price, floored to minimumFee if
+  // under it, with flatbedSurcharge added when required and afterHoursPct
+  // applied last as a markup on the whole total. Every argument after
+  // towMiles/rateTableRow is optional — omit servicePrice/flatbedRequired/
+  // isAfterHours for a plain base+mileage job, which reduces to exactly
+  // today's $85 + $3/mi formula when rateTableRow is RATE_ENGINE_DEFAULTS.
+  function computeExpectedAmount(towMiles, rateTableRow, servicePrice, flatbedRequired, isAfterHours) {
+    var rt = rateTableRow || RATE_ENGINE_DEFAULTS;
+    var included = parseFloat(rt.includedMiles) || 0;
+    var perMile = parseFloat(rt.perMileRate) || 0;
+    var base = parseFloat(rt.baseFee) || 0;
+    var minimum = parseFloat(rt.minimumFee) || 0;
+    var afterHoursPct = parseFloat(rt.afterHoursPct) || 0;
+    var flatbedSurcharge = parseFloat(rt.flatbedSurcharge) || 0;
+    var billableMiles = Math.max(0, (parseFloat(towMiles) || 0) - included);
+    if (rt.rounding === "nearest") billableMiles = Math.round(billableMiles);
+    else if (rt.rounding !== "none") billableMiles = Math.ceil(billableMiles); // default: ceiling
+    var amount = base + billableMiles * perMile + (parseFloat(servicePrice) || 0);
+    if (flatbedRequired) amount += flatbedSurcharge;
+    if (isAfterHours && afterHoursPct) amount = amount * (1 + afterHoursPct / 100);
+    if (minimum && amount < minimum) amount = minimum;
+    return Math.round(amount * 100) / 100;
+  }
+
+  // GHL's REST API needs a custom object's schemaKey fully qualified as
+  // "custom_objects.<key>" in record-level URLs (confirmed 2026-09-17, see
+  // dashboard.js's objectSchemaKey() for the original finding) — repeated
+  // here rather than shared since these two files don't share any module
+  // system (each is one standalone <script> tag, by design — see README).
+  function objectSchemaKey(shortKey) {
+    return "custom_objects." + shortKey;
+  }
+
+  // Paginates POST /objects/:schemaKey/records/search using searchAfter —
+  // identical shape to dashboard.js's loadAllObjectRecords(), copied rather
+  // than imported for the same no-shared-module reason as objectSchemaKey
+  // above.
+  function listObjectRecords(shortKey) {
+    var pageLimit = 100;
+    var all = [];
+    function next(searchAfter) {
+      var body = { locationId: CONFIG.locationId, page: 1, pageLimit: pageLimit, query: "" };
+      if (searchAfter) body.searchAfter = searchAfter;
+      return ghlApi("/objects/" + objectSchemaKey(shortKey) + "/records/search", { method: "POST", version: CONFIG.apiVersions.objects, body: body }).then(function (res) {
+        var batch = res.records || [];
+        all = all.concat(batch);
+        if (batch.length < pageLimit || all.length > 5000) return all;
+        var last = batch[batch.length - 1];
+        return next(last && last.searchAfter);
+      });
+    }
+    return next(null);
+  }
+
+  function createObjectRecord(shortKey, properties) {
+    return ghlApi("/objects/" + objectSchemaKey(shortKey) + "/records", {
+      method: "POST",
+      version: CONFIG.apiVersions.objects,
+      body: { locationId: CONFIG.locationId, properties: properties },
+    });
+  }
+
+  function updateObjectRecord(shortKey, recordId, properties) {
+    return ghlApi("/objects/" + objectSchemaKey(shortKey) + "/records/" + recordId, {
+      method: "PUT",
+      version: CONFIG.apiVersions.objects,
+      body: { properties: properties },
+    });
+  }
+
+  // Creates the Custom Object schema itself (the "table") if a GET on its
+  // key 404s, leaves it alone if it already exists. UNVERIFIED — see this
+  // section's top-of-block comment.
+  function ensureObjectSchema(shortKey, labels) {
+    return ghlApi("/objects/" + objectSchemaKey(shortKey), { version: CONFIG.apiVersions.objects })
+      .then(function () { return { created: false }; })
+      .catch(function (err) {
+        // Only a 404 ("doesn't exist yet") should fall through to create —
+        // anything else (a 401/403 from a bad/under-scoped token, a 429, a
+        // transient network error) must surface as a real failure instead
+        // of being silently reinterpreted as "missing" and retried as a
+        // create, which would either mask the real problem or attempt a
+        // duplicate create against an object that does exist but errored
+        // for some other reason.
+        if (!/ 404 /.test(" " + String((err && err.message) || "") + " ")) throw err;
+        return ghlApi("/objects/", {
+          method: "POST",
+          version: CONFIG.apiVersions.objects,
+          body: {
+            locationId: CONFIG.locationId,
+            key: shortKey,
+            labels: labels, // { singular, plural }
+            primaryDisplayPropertyDetails: { key: "name", name: "Name", dataType: "TEXT" },
+          },
+        }).then(function () { return { created: true }; });
+      });
+  }
+
+  // Adds one field to a Custom Object schema if a field with this name
+  // doesn't already exist on it. dataType is one of GHL's custom-object
+  // field types: TEXT | LARGE_TEXT | NUMERICAL | MONETORY | CHECKBOX |
+  // SINGLE_OPTIONS | DATE. UNVERIFIED — see this section's top-of-block
+  // comment.
+  function ensureObjectField(shortKey, fieldDef) {
+    return ghlApi("/objects/" + objectSchemaKey(shortKey) + "/fields", { version: CONFIG.apiVersions.objects })
+      .then(function (res) {
+        var existing = (res && (res.fields || res)) || [];
+        var already = existing.some(function (f) { return String(f.name || "").trim().toLowerCase() === fieldDef.name.trim().toLowerCase(); });
+        if (already) return { created: false };
+        return ghlApi("/objects/" + objectSchemaKey(shortKey) + "/fields", {
+          method: "POST",
+          version: CONFIG.apiVersions.objects,
+          body: Object.assign({ locationId: CONFIG.locationId }, fieldDef),
+        }).then(function () { return { created: true }; });
+      });
+  }
+
+  // Adds one field to the Opportunity model itself (a different endpoint
+  // than custom-object fields above — this is the same
+  // /locations/:id/customFields endpoint resolveFieldIds() already reads
+  // from, just with method: POST instead of GET). UNVERIFIED.
+  function ensureOpportunityField(fieldDef) {
+    return fetchCustomFieldDefs("opportunity").then(function (existing) {
+      var already = existing.some(function (f) { return String(f.name || "").trim().toLowerCase() === fieldDef.name.trim().toLowerCase(); });
+      if (already) return { created: false };
+      return ghlApi("/locations/" + CONFIG.locationId + "/customFields", {
+        method: "POST",
+        version: "v3",
+        body: Object.assign({ model: "opportunity" }, fieldDef),
+      }).then(function () { return { created: true }; });
+    });
+  }
+
+  // Idempotent — safe to click more than once (each ensure* call checks
+  // before creating). Builds, in order: the 3 Custom Object schemas, their
+  // fields, the 2 new Opportunity fields, then seeds exactly one "Current"
+  // rate table (today's live $85/$3 numbers, so nothing changes for CJT)
+  // plus two Business Account records named "AAA" and "Private" (matching
+  // the existing Dispatch Source field's two values) both pointing at it —
+  // only on the very first run (skipped if any rate_tables record already
+  // exists, so re-running this later never re-seeds over real data).
+  function ensureRateEngineSetup(onStep) {
+    function step(label, fn) {
+      if (onStep) onStep(label);
+      return fn();
+    }
+    return step("Rate tables object", function () {
+      return ensureObjectSchema(CONFIG.objectKeys.rateTables, { singular: "Rate Table", plural: "Rate Tables" });
+    })
+      .then(function () {
+        return Promise.all([
+          ensureObjectField(CONFIG.objectKeys.rateTables, { name: "Effective Date", dataType: "DATE" }),
+          ensureObjectField(CONFIG.objectKeys.rateTables, { name: "Is Current", dataType: "CHECKBOX" }),
+          ensureObjectField(CONFIG.objectKeys.rateTables, { name: "Base Fee", dataType: "MONETORY" }),
+          ensureObjectField(CONFIG.objectKeys.rateTables, { name: "Per Mile Rate", dataType: "MONETORY" }),
+          ensureObjectField(CONFIG.objectKeys.rateTables, { name: "Included Miles", dataType: "NUMERICAL" }),
+          ensureObjectField(CONFIG.objectKeys.rateTables, { name: "Minimum Fee", dataType: "MONETORY" }),
+          ensureObjectField(CONFIG.objectKeys.rateTables, { name: "After Hours Pct", dataType: "NUMERICAL" }),
+          ensureObjectField(CONFIG.objectKeys.rateTables, { name: "Flatbed Surcharge", dataType: "MONETORY" }),
+          ensureObjectField(CONFIG.objectKeys.rateTables, {
+            name: "Rounding", dataType: "SINGLE_OPTIONS",
+            picklistOptions: ["ceiling", "nearest", "none"],
+          }),
+        ]);
+      })
+      .then(function () {
+        return step("Services object", function () {
+          return ensureObjectSchema(CONFIG.objectKeys.services, { singular: "Service", plural: "Services" });
+        });
+      })
+      .then(function () {
+        return Promise.all([
+          ensureObjectField(CONFIG.objectKeys.services, { name: "Category", dataType: "TEXT" }),
+          ensureObjectField(CONFIG.objectKeys.services, {
+            name: "Unit", dataType: "SINGLE_OPTIONS",
+            picklistOptions: ["flat", "per_mile", "per_hour", "per_day", "per_unit"],
+          }),
+          ensureObjectField(CONFIG.objectKeys.services, { name: "Active", dataType: "CHECKBOX" }),
+          ensureObjectField(CONFIG.objectKeys.services, { name: "Price", dataType: "MONETORY" }),
+        ]);
+      })
+      .then(function () {
+        return step("Business accounts object", function () {
+          return ensureObjectSchema(CONFIG.objectKeys.businessAccounts, { singular: "Business Account", plural: "Business Accounts" });
+        });
+      })
+      .then(function () {
+        return Promise.all([
+          ensureObjectField(CONFIG.objectKeys.businessAccounts, {
+            name: "Type", dataType: "SINGLE_OPTIONS",
+            picklistOptions: ["motor_club", "commercial", "property_manager", "dealership", "individual"],
+          }),
+          ensureObjectField(CONFIG.objectKeys.businessAccounts, { name: "Default Rate Table", dataType: "TEXT" }),
+          ensureObjectField(CONFIG.objectKeys.businessAccounts, { name: "Billing Contact", dataType: "TEXT" }),
+          ensureObjectField(CONFIG.objectKeys.businessAccounts, { name: "Payment Terms", dataType: "TEXT" }),
+          ensureObjectField(CONFIG.objectKeys.businessAccounts, { name: "Notes", dataType: "LARGE_TEXT" }),
+        ]);
+      })
+      .then(function () {
+        return step("Opportunity fields (Service Type, Rate Table Used)", function () {
+          return Promise.all([
+            ensureOpportunityField({ name: "Service Type", dataType: "SINGLE_OPTIONS", picklistOptions: [] }),
+            ensureOpportunityField({ name: "Rate Table Used", dataType: "TEXT" }),
+          ]);
+        });
+      })
+      .then(function () {
+        return step("Seed default rate table + accounts (first run only)", function () {
+          return listObjectRecords(CONFIG.objectKeys.rateTables).then(function (existingTables) {
+            if (existingTables.length > 0) return { seeded: false };
+            var today = new Date().toISOString().slice(0, 10);
+            return createObjectRecord(CONFIG.objectKeys.rateTables, {
+              name: RATE_ENGINE_DEFAULTS.name,
+              effective_date: today,
+              is_current: true,
+              base_fee: RATE_ENGINE_DEFAULTS.baseFee,
+              per_mile_rate: RATE_ENGINE_DEFAULTS.perMileRate,
+              included_miles: RATE_ENGINE_DEFAULTS.includedMiles,
+              minimum_fee: RATE_ENGINE_DEFAULTS.minimumFee,
+              after_hours_pct: RATE_ENGINE_DEFAULTS.afterHoursPct,
+              flatbed_surcharge: RATE_ENGINE_DEFAULTS.flatbedSurcharge,
+              rounding: RATE_ENGINE_DEFAULTS.rounding,
+            }).then(function () {
+              return Promise.all([
+                createObjectRecord(CONFIG.objectKeys.businessAccounts, { name: "AAA", type: "motor_club", default_rate_table: RATE_ENGINE_DEFAULTS.name }),
+                createObjectRecord(CONFIG.objectKeys.businessAccounts, { name: "Private", type: "individual", default_rate_table: RATE_ENGINE_DEFAULTS.name }),
+              ]);
+            }).then(function () { return { seeded: true }; });
+          });
+        });
+      });
   }
 
   // GHL's REST API needs a custom object's schemaKey fully qualified as
@@ -956,6 +1295,12 @@
     loadPipelines: loadPipelines,
     resolveFieldIds: resolveFieldIds,
     FIELD_NAME_CANDIDATES: FIELD_NAME_CANDIDATES,
+    computeExpectedAmount: computeExpectedAmount,
+    RATE_ENGINE_DEFAULTS: RATE_ENGINE_DEFAULTS,
+    ensureRateEngineSetup: ensureRateEngineSetup,
+    listObjectRecords: listObjectRecords,
+    createObjectRecord: createObjectRecord,
+    updateObjectRecord: updateObjectRecord,
   };
 
   // ---------------------------------------------------------------------
@@ -1125,6 +1470,63 @@
     '<div id="extDownloadWrap"></div>' +
     '</div>' +
 
+    '<div class="card" id="cardRates"><h2>8. Rates &amp; Services</h2>' +
+    '<div class="cardDesc">What a job costs, in one place instead of scattered across GHL screens: a catalog of services (what kind of job), rate tables (base fee, per-mile rate, minimum, flatbed surcharge — a job keeps whatever table was current when it was created, so changing a rate here never touches a past job), and business accounts (AAA vs. Private today — each can default to its own rate table).</div>' +
+    '<div class="btnRow"><button type="button" class="btn primary" id="btnSetupRateEngine">Set up rate engine</button><button type="button" class="btn" id="btnLoadRates">Reload</button></div>' +
+    '<div class="statusMsg" id="rateSetupStatus"></div>' +
+
+    '<div style="margin-top:20px;"><h3 style="font-size:13.5px;margin:0 0 4px;">Services</h3>' +
+    '<div class="hint" style="margin-bottom:10px;">What kind of job this is — each can carry its own price, added on top of the base fee/mileage below.</div>' +
+    '<div id="servicesTableWrap"></div>' +
+    '<div class="fieldRow" style="margin-top:12px;">' +
+    '<div class="field"><label>Name</label><input type="text" id="fSvcName" placeholder="e.g. Winch Out"></div>' +
+    '<div class="field"><label>Category</label><input type="text" id="fSvcCategory" placeholder="towing" value="towing"></div>' +
+    '</div>' +
+    '<div class="fieldRow">' +
+    '<div class="field"><label>Unit</label><select id="fSvcUnit"><option value="flat">flat</option><option value="per_mile">per_mile</option><option value="per_hour">per_hour</option><option value="per_day">per_day</option><option value="per_unit">per_unit</option></select></div>' +
+    '<div class="field"><label>Price ($)</label><input type="number" step="0.01" id="fSvcPrice" value="0"></div>' +
+    '</div>' +
+    '<div class="btnRow"><button type="button" class="btn primary" id="btnSaveService">Add service</button><button type="button" class="btn" id="btnCancelSvcEdit" style="display:none;">Cancel edit</button></div>' +
+    '<div class="statusMsg" id="svcStatus"></div>' +
+    '</div>' +
+
+    '<div style="margin-top:28px;"><h3 style="font-size:13.5px;margin:0 0 4px;">Rate Tables</h3>' +
+    '<div class="hint" style="margin-bottom:10px;">Only one table is "current" at a time — that\'s the one new jobs get priced against. Changing numbers on a historical (non-current) table never affects anything.</div>' +
+    '<div id="ratesTableWrap"></div>' +
+    '<div class="fieldRow" style="margin-top:12px;">' +
+    '<div class="field"><label>Name</label><input type="text" id="fRtName" placeholder="e.g. 2027 Contract"></div>' +
+    '<div class="field"><label>Rounding</label><select id="fRtRounding"><option value="ceiling">ceiling</option><option value="nearest">nearest</option><option value="none">none</option></select></div>' +
+    '</div>' +
+    '<div class="fieldRow">' +
+    '<div class="field"><label>Base Fee ($)</label><input type="number" step="0.01" id="fRtBase" value="85"></div>' +
+    '<div class="field"><label>Per-Mile Rate ($)</label><input type="number" step="0.01" id="fRtPerMile" value="3"></div>' +
+    '</div>' +
+    '<div class="fieldRow">' +
+    '<div class="field"><label>Included Miles (free)</label><input type="number" step="0.1" id="fRtIncluded" value="0"></div>' +
+    '<div class="field"><label>Minimum Fee ($)</label><input type="number" step="0.01" id="fRtMin" value="0"></div>' +
+    '</div>' +
+    '<div class="fieldRow">' +
+    '<div class="field"><label>After-Hours Markup (%)</label><input type="number" step="0.1" id="fRtAfterHours" value="0"></div>' +
+    '<div class="field"><label>Flatbed Surcharge ($)</label><input type="number" step="0.01" id="fRtFlatbed" value="0"></div>' +
+    '</div>' +
+    '<div class="field"><label><input type="checkbox" id="fRtIsCurrent" style="width:auto;margin-right:6px;">Make this the current table</label></div>' +
+    '<div class="btnRow"><button type="button" class="btn primary" id="btnSaveRateTable">Add rate table</button><button type="button" class="btn" id="btnCancelRtEdit" style="display:none;">Cancel edit</button></div>' +
+    '<div class="statusMsg" id="rtStatus"></div>' +
+    '</div>' +
+
+    '<div style="margin-top:28px;"><h3 style="font-size:13.5px;margin:0 0 4px;">Business Accounts</h3>' +
+    '<div class="hint" style="margin-bottom:10px;">Matches the existing Dispatch Source field (AAA / Private) by name — add one here with that exact name to give it its own default rate table.</div>' +
+    '<div id="acctsTableWrap"></div>' +
+    '<div class="fieldRow" style="margin-top:12px;">' +
+    '<div class="field"><label>Name</label><input type="text" id="fAcctName" placeholder="e.g. AAA (must match Dispatch Source)"></div>' +
+    '<div class="field"><label>Type</label><select id="fAcctType"><option value="motor_club">motor_club</option><option value="commercial">commercial</option><option value="property_manager">property_manager</option><option value="dealership">dealership</option><option value="individual">individual</option></select></div>' +
+    '</div>' +
+    '<div class="field"><label>Default Rate Table</label><select id="fAcctRateTable"></select></div>' +
+    '<div class="btnRow"><button type="button" class="btn primary" id="btnSaveAcct">Add business account</button><button type="button" class="btn" id="btnCancelAcctEdit" style="display:none;">Cancel edit</button></div>' +
+    '<div class="statusMsg" id="acctStatus"></div>' +
+    '</div>' +
+    '</div>' +
+
     '<div class="foot-note" id="footNote">Field IDs for AAA reconciliation on the Opportunity are specific to this GHL location — see the note at the top of setup.js before reusing this for a different client.</div>' +
     "</div>";
 
@@ -1257,7 +1659,11 @@
      "fFile", "togglePaste", "pasteWrap", "fPaste", "btnPreview",
      "importProgress", "importProgressBar", "importProgressLabel", "importStatus", "importSummary", "importTableWrap", "applyWrap",
      "btnScanDupes", "dupeProgress", "dupeProgressBar", "dupeProgressLabel", "dupeStatus", "dupeResultsWrap",
-     "extDownloadWrap"
+     "extDownloadWrap",
+     "btnSetupRateEngine", "btnLoadRates", "rateSetupStatus",
+     "servicesTableWrap", "fSvcName", "fSvcCategory", "fSvcUnit", "fSvcPrice", "btnSaveService", "btnCancelSvcEdit", "svcStatus",
+     "ratesTableWrap", "fRtName", "fRtRounding", "fRtBase", "fRtPerMile", "fRtIncluded", "fRtMin", "fRtAfterHours", "fRtFlatbed", "fRtIsCurrent", "btnSaveRateTable", "btnCancelRtEdit", "rtStatus",
+     "acctsTableWrap", "fAcctName", "fAcctType", "fAcctRateTable", "btnSaveAcct", "btnCancelAcctEdit", "acctStatus"
     ].forEach(function (id) { els[id] = root.querySelector("#" + id); });
 
     // ---- Prefill from CONFIG (whatever was pasted in window.CJT_CONFIG) ----
@@ -1792,5 +2198,239 @@
       });
     }
     renderExtensionDownload();
+
+    // ---- 8. Rates & Services -------------------------------------------
+    var rateEngineData = { services: [], rateTables: [], accounts: [] };
+    var editingSvcId = null, editingRtId = null, editingAcctId = null;
+
+    function requireConn() {
+      if (!CONFIG.locationId || !CONFIG.privateToken) {
+        showStatus(els.rateSetupStatus, "err", "Fill in Location ID and Private Integration Token above first (section 1), then come back here.");
+        return false;
+      }
+      return true;
+    }
+
+    els.btnSetupRateEngine.addEventListener("click", function () {
+      if (!requireConn()) return;
+      Object.assign(CONFIG, liveConfigFromForm());
+      els.btnSetupRateEngine.disabled = true;
+      showStatus(els.rateSetupStatus, "info", "Starting…");
+      ensureRateEngineSetup(function (label) { showStatus(els.rateSetupStatus, "info", label + "…"); })
+        .then(function () {
+          showStatus(els.rateSetupStatus, "ok", "Rate engine is set up. Loading…");
+          return loadRatesData();
+        })
+        .catch(function (err) {
+          showStatus(els.rateSetupStatus, "err", "Setup failed: " + err.message + " — safe to click “Set up rate engine” again, it skips anything already created.");
+        })
+        .finally(function () { els.btnSetupRateEngine.disabled = false; });
+    });
+    els.btnLoadRates.addEventListener("click", function () {
+      if (!requireConn()) return;
+      Object.assign(CONFIG, liveConfigFromForm());
+      loadRatesData();
+    });
+
+    function loadRatesData() {
+      showStatus(els.rateSetupStatus, "info", "Loading services, rate tables, and business accounts…");
+      return Promise.all([
+        listObjectRecords(CONFIG.objectKeys.services).catch(function () { return []; }),
+        listObjectRecords(CONFIG.objectKeys.rateTables).catch(function () { return []; }),
+        listObjectRecords(CONFIG.objectKeys.businessAccounts).catch(function () { return []; }),
+      ]).then(function (results) {
+        rateEngineData.services = results[0];
+        rateEngineData.rateTables = results[1];
+        rateEngineData.accounts = results[2];
+        renderServicesTable();
+        renderRateTablesTable();
+        renderAcctsTable();
+        hideStatus(els.rateSetupStatus);
+      }).catch(function (err) {
+        showStatus(els.rateSetupStatus, "err", "Couldn't load — " + err.message + ". If this is the first time, click “Set up rate engine” first.");
+      });
+    }
+
+    function propsOf(r) { return r.properties || {}; }
+
+    function renderServicesTable() {
+      var rows = rateEngineData.services;
+      if (!rows.length) { els.servicesTableWrap.innerHTML = '<div class="hint">No services yet — add one below (optional; the base fee/mileage rate below work fine with zero services).</div>'; return; }
+      els.servicesTableWrap.innerHTML =
+        '<div class="tableWrap"><table><thead><tr><th>Name</th><th>Category</th><th>Unit</th><th>Price</th><th>Active</th><th></th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          var p = propsOf(r);
+          return "<tr><td>" + esc(p.name) + "</td><td>" + esc(p.category || "") + "</td><td>" + esc(p.unit || "flat") + "</td><td>" + money(p.price) + "</td><td>" +
+            (p.active === false ? "inactive" : "active") + '</td><td><button type="button" class="btn" data-edit-svc="' + esc(r.id) + '">Edit</button></td></tr>';
+        }).join("") + "</tbody></table></div>";
+      Array.prototype.forEach.call(els.servicesTableWrap.querySelectorAll("[data-edit-svc]"), function (btn) {
+        btn.addEventListener("click", function () {
+          var rec = rows.filter(function (r) { return r.id === btn.getAttribute("data-edit-svc"); })[0];
+          if (!rec) return;
+          var p = propsOf(rec);
+          editingSvcId = rec.id;
+          els.fSvcName.value = p.name || "";
+          els.fSvcCategory.value = p.category || "towing";
+          els.fSvcUnit.value = p.unit || "flat";
+          els.fSvcPrice.value = p.price != null ? p.price : 0;
+          els.btnSaveService.textContent = "Save changes";
+          els.btnCancelSvcEdit.style.display = "";
+        });
+      });
+    }
+
+    function resetSvcForm() {
+      editingSvcId = null;
+      els.fSvcName.value = ""; els.fSvcCategory.value = "towing"; els.fSvcUnit.value = "flat"; els.fSvcPrice.value = 0;
+      els.btnSaveService.textContent = "Add service";
+      els.btnCancelSvcEdit.style.display = "none";
+    }
+    els.btnCancelSvcEdit.addEventListener("click", resetSvcForm);
+    els.btnSaveService.addEventListener("click", function () {
+      if (!requireConn()) return;
+      var name = els.fSvcName.value.trim();
+      if (!name) { showStatus(els.svcStatus, "err", "Name is required."); return; }
+      var props = { name: name, category: els.fSvcCategory.value.trim() || "towing", unit: els.fSvcUnit.value, price: parseFloat(els.fSvcPrice.value) || 0, active: true };
+      els.btnSaveService.disabled = true;
+      var p = editingSvcId ? updateObjectRecord(CONFIG.objectKeys.services, editingSvcId, props) : createObjectRecord(CONFIG.objectKeys.services, props);
+      p.then(function () {
+        showStatus(els.svcStatus, "ok", "Saved.");
+        resetSvcForm();
+        return loadRatesData();
+      }).catch(function (err) {
+        showStatus(els.svcStatus, "err", "Couldn't save: " + err.message);
+      }).finally(function () { els.btnSaveService.disabled = false; });
+    });
+
+    function renderRateTablesTable() {
+      var rows = rateEngineData.rateTables;
+      if (!rows.length) { els.ratesTableWrap.innerHTML = '<div class="hint">No rate tables yet — click “Set up rate engine” above to seed the first one from today\'s live numbers.</div>'; return; }
+      els.ratesTableWrap.innerHTML =
+        '<div class="tableWrap"><table><thead><tr><th>Name</th><th>Base</th><th>Per Mile</th><th>Included mi</th><th>Minimum</th><th>After-hrs %</th><th>Flatbed +</th><th>Rounding</th><th>Current</th><th></th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          var p = propsOf(r);
+          return "<tr><td><b>" + esc(p.name) + "</b></td><td>" + money(p.base_fee) + "</td><td>" + money(p.per_mile_rate) + "</td><td>" + esc(p.included_miles || 0) +
+            "</td><td>" + money(p.minimum_fee) + "</td><td>" + esc(p.after_hours_pct || 0) + "%</td><td>" + money(p.flatbed_surcharge) + "</td><td>" + esc(p.rounding || "ceiling") +
+            "</td><td>" + (p.is_current ? '<span class="status-pill status-matched">current</span>' : '<span class="status-pill">historical</span>') +
+            '</td><td><button type="button" class="btn" data-edit-rt="' + esc(r.id) + '">Edit</button></td></tr>';
+        }).join("") + "</tbody></table></div>";
+      Array.prototype.forEach.call(els.ratesTableWrap.querySelectorAll("[data-edit-rt]"), function (btn) {
+        btn.addEventListener("click", function () {
+          var rec = rows.filter(function (r) { return r.id === btn.getAttribute("data-edit-rt"); })[0];
+          if (!rec) return;
+          var p = propsOf(rec);
+          editingRtId = rec.id;
+          els.fRtName.value = p.name || "";
+          els.fRtRounding.value = p.rounding || "ceiling";
+          els.fRtBase.value = p.base_fee != null ? p.base_fee : 85;
+          els.fRtPerMile.value = p.per_mile_rate != null ? p.per_mile_rate : 3;
+          els.fRtIncluded.value = p.included_miles || 0;
+          els.fRtMin.value = p.minimum_fee || 0;
+          els.fRtAfterHours.value = p.after_hours_pct || 0;
+          els.fRtFlatbed.value = p.flatbed_surcharge || 0;
+          els.fRtIsCurrent.checked = !!p.is_current;
+          els.btnSaveRateTable.textContent = "Save changes";
+          els.btnCancelRtEdit.style.display = "";
+        });
+      });
+    }
+
+    function resetRtForm() {
+      editingRtId = null;
+      els.fRtName.value = ""; els.fRtRounding.value = "ceiling"; els.fRtBase.value = 85; els.fRtPerMile.value = 3;
+      els.fRtIncluded.value = 0; els.fRtMin.value = 0; els.fRtAfterHours.value = 0; els.fRtFlatbed.value = 0; els.fRtIsCurrent.checked = false;
+      els.btnSaveRateTable.textContent = "Add rate table";
+      els.btnCancelRtEdit.style.display = "none";
+    }
+    els.btnCancelRtEdit.addEventListener("click", resetRtForm);
+    els.btnSaveRateTable.addEventListener("click", function () {
+      if (!requireConn()) return;
+      var name = els.fRtName.value.trim();
+      if (!name) { showStatus(els.rtStatus, "err", "Name is required."); return; }
+      var makeCurrent = els.fRtIsCurrent.checked;
+      var props = {
+        name: name, rounding: els.fRtRounding.value,
+        base_fee: parseFloat(els.fRtBase.value) || 0, per_mile_rate: parseFloat(els.fRtPerMile.value) || 0,
+        included_miles: parseFloat(els.fRtIncluded.value) || 0, minimum_fee: parseFloat(els.fRtMin.value) || 0,
+        after_hours_pct: parseFloat(els.fRtAfterHours.value) || 0, flatbed_surcharge: parseFloat(els.fRtFlatbed.value) || 0,
+        is_current: makeCurrent,
+      };
+      if (!editingRtId) props.effective_date = new Date().toISOString().slice(0, 10);
+      els.btnSaveRateTable.disabled = true;
+      var save = editingRtId ? updateObjectRecord(CONFIG.objectKeys.rateTables, editingRtId, props) : createObjectRecord(CONFIG.objectKeys.rateTables, props);
+      save.then(function () {
+        if (!makeCurrent) return;
+        // Only one table should ever be "current" — unset every other one
+        // that still claims it, same rule HookOps' own data enforces (it
+        // just happens to do it via a UNIQUE-ish admin convention rather
+        // than a real constraint — mirrored here explicitly since GHL has
+        // no such constraint to lean on at all).
+        var others = rateEngineData.rateTables.filter(function (r) { return propsOf(r).is_current && r.id !== editingRtId; });
+        return Promise.all(others.map(function (r) { return updateObjectRecord(CONFIG.objectKeys.rateTables, r.id, { is_current: false }); }));
+      }).then(function () {
+        showStatus(els.rtStatus, "ok", "Saved.");
+        resetRtForm();
+        return loadRatesData();
+      }).catch(function (err) {
+        showStatus(els.rtStatus, "err", "Couldn't save: " + err.message);
+      }).finally(function () { els.btnSaveRateTable.disabled = false; });
+    });
+
+    function renderAcctsTable() {
+      var opts = '<option value="">—</option>' + rateEngineData.rateTables.map(function (r) {
+        return '<option value="' + esc(propsOf(r).name) + '">' + esc(propsOf(r).name) + "</option>";
+      }).join("");
+      els.fAcctRateTable.innerHTML = opts;
+      var rows = rateEngineData.accounts;
+      if (!rows.length) { els.acctsTableWrap.innerHTML = '<div class="hint">No business accounts yet — “Set up rate engine” seeds “AAA” and “Private” automatically.</div>'; return; }
+      els.acctsTableWrap.innerHTML =
+        '<div class="tableWrap"><table><thead><tr><th>Name</th><th>Type</th><th>Default Rate Table</th><th></th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          var p = propsOf(r);
+          return "<tr><td><b>" + esc(p.name) + "</b></td><td>" + esc(p.type || "") + "</td><td>" + esc(p.default_rate_table || "—") +
+            '</td><td><button type="button" class="btn" data-edit-acct="' + esc(r.id) + '">Edit</button></td></tr>';
+        }).join("") + "</tbody></table></div>";
+      Array.prototype.forEach.call(els.acctsTableWrap.querySelectorAll("[data-edit-acct]"), function (btn) {
+        btn.addEventListener("click", function () {
+          var rec = rows.filter(function (r) { return r.id === btn.getAttribute("data-edit-acct"); })[0];
+          if (!rec) return;
+          var p = propsOf(rec);
+          editingAcctId = rec.id;
+          els.fAcctName.value = p.name || "";
+          els.fAcctType.value = p.type || "individual";
+          els.fAcctRateTable.value = p.default_rate_table || "";
+          els.btnSaveAcct.textContent = "Save changes";
+          els.btnCancelAcctEdit.style.display = "";
+        });
+      });
+    }
+
+    function resetAcctForm() {
+      editingAcctId = null;
+      els.fAcctName.value = ""; els.fAcctType.value = "individual"; els.fAcctRateTable.value = "";
+      els.btnSaveAcct.textContent = "Add business account";
+      els.btnCancelAcctEdit.style.display = "none";
+    }
+    els.btnCancelAcctEdit.addEventListener("click", resetAcctForm);
+    els.btnSaveAcct.addEventListener("click", function () {
+      if (!requireConn()) return;
+      var name = els.fAcctName.value.trim();
+      if (!name) { showStatus(els.acctStatus, "err", "Name is required — use the exact Dispatch Source value (e.g. “AAA” or “Private”) so this account is actually picked up."); return; }
+      var props = { name: name, type: els.fAcctType.value, default_rate_table: els.fAcctRateTable.value || "" };
+      els.btnSaveAcct.disabled = true;
+      var save = editingAcctId ? updateObjectRecord(CONFIG.objectKeys.businessAccounts, editingAcctId, props) : createObjectRecord(CONFIG.objectKeys.businessAccounts, props);
+      save.then(function () {
+        showStatus(els.acctStatus, "ok", "Saved.");
+        resetAcctForm();
+        return loadRatesData();
+      }).catch(function (err) {
+        showStatus(els.acctStatus, "err", "Couldn't save: " + err.message);
+      }).finally(function () { els.btnSaveAcct.disabled = false; });
+    });
+
+    // Auto-load if a connection is already configured (e.g. this page was
+    // loaded with a real CJT_CONFIG already pasted in), so the admin isn't
+    // staring at empty tables before doing anything.
+    if (CONFIG.locationId && CONFIG.privateToken) loadRatesData();
   }
 })();
