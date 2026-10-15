@@ -119,7 +119,15 @@
     // convention this points at.
     extensionRepo: "jmdnoob/cjt-ops-dashboard",
     extensionMacAsset: "AAA-GHL-Extractor-Mac.zip",
-    extensionWindowsAsset: "AAA-GHL-Extractor-Windows-v1.0.0.zip",
+    // Unversioned, same as extensionMacAsset above (was pinned to
+    // "...-v1.0.0.zip" until 2026-10-15, which meant every new Windows
+    // build needed a setup.js edit + redeploy just to ship an update — the
+    // Mac asset was never pinned this way. Dropping the version from the
+    // filename itself fixes that: publish a new GitHub Release with a zip
+    // named exactly this, and the download button here picks it up with no
+    // code change, matching the Mac side. See README.md "Distributing the
+    // extension".
+    extensionWindowsAsset: "AAA-GHL-Extractor-Windows.zip",
     objectKeys: {
       drivers: "driver_profiles",
       fleet: "trucks",
@@ -1638,19 +1646,19 @@
           'Open your Downloads folder and double-click <span class="mono">AAA-GHL-Extractor-Mac.zip</span> to unzip it (Safari often does this automatically right after the download finishes).',
           'Open the unzipped <span class="mono">AAA-GHL-Extractor-Mac</span> folder.',
           '<b>Right-click</b> <span class="mono">INSTALL-MAC.command</span> and choose <b>Open</b> — do not double-click it. macOS blocks it the first time as "from an unidentified developer"; right-click → Open tells macOS to trust it, once.',
-          "Click <b>Open</b> again in the confirmation dialog. A Terminal window runs the installer — follow its prompts (same GHL token/location ID it's always asked for).",
-          'When the installer finishes, it opens Microsoft Edge to <span class="mono">edge://extensions</span> and opens the extension folder in Finder for you — turn on <b>Developer mode</b> (bottom-left), click <b>Load unpacked</b>, and select the <span class="mono">aaa-browser-extension</span> folder Finder opened to.',
+          "Click <b>Open</b> again in the confirmation dialog. A Terminal window runs the installer — follow its prompts (same GHL token/location ID it's always asked for). It registers the extension for Chrome, Edge, Brave, and Vivaldi (Opera works automatically too), so it doesn't matter which one you use next.",
+          'When the installer finishes, it opens your browser\'s extensions page (Chrome, or Edge if Chrome isn\'t installed) and opens the extension folder in Finder for you — turn on <b>Developer mode</b> (bottom-left), click <b>Load unpacked</b>, and select the <span class="mono">aaa-browser-extension</span> folder Finder opened to. Use whichever supported browser you actually work in — chrome://extensions or edge://extensions both work the same way.',
           'Open an AAA Work Order page — the extension icon should show "Connected." If it doesn\'t, double-click <span class="mono">CHECK-SETUP.command</span> in that same folder for a diagnostic.'
         ];
       }
       if (kind === "windows") {
         return [
           "Your download has started in the browser (its own download bar/notification, not this page) — wait for it to finish.",
-          'Open your Downloads folder, right-click <span class="mono">AAA-GHL-Extractor-Windows-v1.0.0.zip</span>, and choose <b>Extract All…</b> to unzip it.',
-          'Open the unzipped <span class="mono">AAA-GHL-Extractor-Windows-v1.0.0</span> folder.',
+          'Open your Downloads folder, right-click <span class="mono">AAA-GHL-Extractor-Windows.zip</span>, and choose <b>Extract All…</b> to unzip it.',
+          'Open the unzipped <span class="mono">AAA-GHL-Extractor-Windows</span> folder.',
           'Double-click <span class="mono">INSTALL-WINDOWS.bat</span>. If you see a blue "Windows protected your PC" SmartScreen screen, click <b>More info</b>, then <b>Run anyway</b> — this is expected for a script that isn\'t signed with a paid certificate, not a sign anything is wrong.',
-          "A console window runs the installer — follow its prompts (same GHL token/location ID it's always asked for). Press Enter to close it when it's done.",
-          'When it finishes, Edge opens to <span class="mono">edge://extensions</span> — turn on <b>Developer mode</b> (bottom-left), click <b>Load unpacked</b>, and select the <span class="mono">aaa-browser-extension</span> folder inside the unzipped folder (File Explorer opens there for you).',
+          "A console window runs the installer — follow its prompts (same GHL token/location ID it's always asked for). It registers the extension for Chrome, Edge, Brave, and Vivaldi (Opera works automatically too), so it doesn't matter which one you use next. Press Enter to close it when it's done.",
+          'When it finishes, your browser\'s extensions page opens (Chrome, or Edge if Chrome isn\'t installed) — turn on <b>Developer mode</b> (bottom-left), click <b>Load unpacked</b>, and select the <span class="mono">aaa-browser-extension</span> folder inside the unzipped folder (File Explorer opens there for you). Use whichever supported browser you actually work in — chrome://extensions or edge://extensions both work the same way.',
           'Open an AAA Work Order page — the extension icon should show "Connected." If it doesn\'t, double-click <span class="mono">CHECK-SETUP-WINDOWS.bat</span> in that same folder for a diagnostic.'
         ];
       }
