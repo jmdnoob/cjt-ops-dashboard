@@ -78,6 +78,10 @@
       rateTables: "rate_tables",
       services: "services",
       businessAccounts: "business_accounts",
+      // Driver Pay Statements (2026-11-03) — see setup.js's "9. Driver Pay
+      // Statements" tab, the only place that writes these. Read-only here,
+      // same as the rate engine objects above.
+      payStatements: "pay_statements",
     },
     // Per-endpoint API "Version" header. GHL versions endpoints independently;
     // these are the values last confirmed against GHL's own docs/captured
@@ -583,6 +587,32 @@
     };
   }
 
+  // Line Items JSON is this file's own line-item storage (see setup.js's
+  // "9. Driver Pay Statements" top comment for why it's a serialized field
+  // instead of a second linked Custom Object) — parsed defensively since a
+  // hand-edited or not-yet-generated record could have it blank or broken.
+  function mapPayStatement(rec) {
+    var p = rec.properties || {};
+    var jobs = [];
+    try { jobs = JSON.parse(p.line_items_json || "[]"); } catch (e) { jobs = []; }
+    return {
+      recordId: rec.id,
+      driver: p.driver_name,
+      periodStart: p.period_start,
+      periodEnd: p.period_end,
+      status: p.status,
+      jobCount: p.job_count != null ? p.job_count : jobs.length,
+      grossJobValue: propVal(p.gross_job_value),
+      commissionPctUsed: p.commission_pct_used,
+      commissionTotal: propVal(p.commission_total),
+      adjustmentAmount: propVal(p.adjustment_amount),
+      adjustmentNote: p.adjustment_note,
+      total: propVal(p.total),
+      generatedAt: p.generated_at,
+      jobs: jobs,
+    };
+  }
+
   // Maps one GHL Opportunity to the AAA-payment row shape the UI below
   // expects (same shape mapAaa() used to produce off the now-removed
   // aaa_payments Custom Object — see loadAaa()'s own comment). Only
@@ -756,6 +786,15 @@
     });
   }
 
+  function loadPayStatements() {
+    return loadAllObjectRecords(CONFIG.objectKeys.payStatements).then(function (recs) {
+      var rows = recs.map(mapPayStatement).sort(function (a, b) {
+        return String(b.generatedAt || "").localeCompare(String(a.generatedAt || ""));
+      });
+      state.payStatements = { records: rows, total: rows.length };
+    });
+  }
+
   // AAA payment data used to live in a separate "aaa_payments" Custom
   // Object, read via loadAllObjectRecords(). The client deleted that object
   // on purpose (2026-10-13) — AAA payment fields belong on the Opportunity
@@ -823,6 +862,7 @@
       { key: "maintenance", fn: loadMaintenance },
       { key: "training", fn: loadTraining },
       { key: "quarters", fn: loadQuarters },
+      { key: "payStatements", fn: loadPayStatements },
       { key: "aaa", fn: loadAaa },
     ];
     return Promise.all(
@@ -1112,6 +1152,7 @@
       maintenance: ghlUrl("/objects/" + CONFIG.objectKeys.maintenance + "/list"),
       training: ghlUrl("/objects/" + CONFIG.objectKeys.training + "/list"),
       quarters: ghlUrl("/objects/" + CONFIG.objectKeys.quarters + "/list"),
+      payStatements: ghlUrl("/objects/" + CONFIG.objectKeys.payStatements + "/list"),
     };
 
     var LINK_FNS = {
@@ -1126,6 +1167,7 @@
         return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.drivers + "/list?recordId=" + r.recordId) : LIST_URLS.drivers;
       },
       quarters: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.quarters + "/list?recordId=" + r.recordId) : LIST_URLS.quarters; },
+      payStatements: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.payStatements + "/list?recordId=" + r.recordId) : LIST_URLS.payStatements; },
       training: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.training + "/list?recordId=" + r.recordId) : LIST_URLS.training; },
       maintenance: function (r) { return r.recordId ? ghlUrl("/objects/" + CONFIG.objectKeys.maintenance + "/list?recordId=" + r.recordId) : LIST_URLS.maintenance; },
       // An AAA payment row IS an Opportunity now — link through its contact,
@@ -1152,6 +1194,7 @@
           { id: "profiles", label: "Profiles" },
           { id: "performance", label: "Performance" },
           { id: "commissions", label: "Commissions" },
+          { id: "payStatements", label: "Pay Statements" },
           { id: "training", label: "Training" },
         ],
       },
@@ -1624,6 +1667,36 @@
         buildTable(cols, d.records || [], LINK_FNS.quarters);
     }
 
+    // Read-only — generated and written only from setup.js's "9. Driver Pay
+    // Statements" tab (staff/admin-only; there's no driver-facing view of
+    // these in this build). Each row IS one generated statement; its own
+    // job-level line items (job name, close date, value, commission) live
+    // in the record's Line Items JSON field (see mapPayStatement above) —
+    // not shown as a separate drill-down table here, since a statement is
+    // a handful of jobs, not worth a second UI layer at this scale. Open
+    // the record in GHL (the row link) to read that JSON directly if ever
+    // needed.
+    function bodyDriversPayStatements() {
+      var d = state.payStatements || {};
+      var cols = [
+        { label: "Driver", render: function (r) { return esc(r.driver); } },
+        { label: "Period", render: function (r) { return esc((r.periodStart || "—") + " → " + (r.periodEnd || "—")); } },
+        { label: "Jobs", render: function (r) { return '<span class="mono">' + esc(r.jobCount != null ? r.jobCount : "—") + "</span>"; } },
+        { label: "Job value", render: function (r) { return money(r.grossJobValue); } },
+        { label: "Commission", render: function (r) { return money(r.commissionTotal); } },
+        { label: "Adjustment", render: function (r) {
+          if (!r.adjustmentAmount) return "&mdash;";
+          return money(r.adjustmentAmount) + (r.adjustmentNote ? ' <span class="text-dim">(' + esc(r.adjustmentNote) + ")</span>" : "");
+        } },
+        { label: "Total", render: function (r) { return money(r.total); } },
+        { label: "Status", render: function (r) { return pill(r.status); } },
+        { label: "Generated", render: function (r) { return dateOnly(r.generatedAt); } },
+      ];
+      sectionBodyEl.innerHTML =
+        panelHead('<span class="live-tag">● Live</span> — Pay Statement custom object in GHL, generated from won Opportunities (job value × driver Commission %) by setup.js\'s "9. Driver Pay Statements" admin tool.', [{ label: "Open in GHL ↗", url: LIST_URLS.payStatements }]) +
+        buildTable(cols, d.records || [], LINK_FNS.payStatements);
+    }
+
     function bodyDriversTraining() {
       var d = state.training || {};
       var cols = [
@@ -1700,6 +1773,7 @@
       "drivers:profiles": bodyDriversProfiles,
       "drivers:performance": bodyDriversPerformance,
       "drivers:commissions": bodyDriversCommissions,
+      "drivers:payStatements": bodyDriversPayStatements,
       "drivers:training": bodyDriversTraining,
       "trucks:fleet": bodyTrucksFleet,
       "trucks:assignments": bodyTrucksAssignments,

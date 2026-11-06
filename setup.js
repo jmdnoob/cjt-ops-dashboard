@@ -158,6 +158,11 @@
       rateTables: "rate_tables",
       services: "services",
       businessAccounts: "business_accounts",
+      // Driver Pay Statements (2026-11-03) — see "9. Driver Pay Statements"
+      // below. One flat object per generated statement (line items live in
+      // its own Line Items JSON field, not a second linked object — see
+      // that section's comment for why).
+      payStatements: "pay_statements",
     },
     apiVersions: {
       pipelines: "v3",
@@ -222,6 +227,11 @@
     dispatchSource: [],
     serviceType: [],
     rateTableUsed: [],
+    // "9. Driver Pay Statements" below creates this fresh on a location's
+    // first run (ensureOpportunityField), same no-fallback-ID situation as
+    // serviceType/rateTableUsed above — there's no ID to fall back to until
+    // that's been run once on a given location.
+    assignedDriver: [],
   };
 
   // Candidate GHL field *names* to match, case/whitespace-insensitive, per
@@ -253,6 +263,15 @@
     // the Opportunity the first time it's run on a given location.
     serviceType: ["service type"],
     rateTableUsed: ["rate table used"],
+    // The field "9. Driver Pay Statements" below creates on the
+    // Opportunity the first time "Set up Pay Statements" is run on a given
+    // location. Plain text, matched by exact name against Drivers →
+    // Profiles' own driver_name — same by-name idiom as Business Account's
+    // Default Rate Table, not a picklist, so it never needs to be kept in
+    // sync with the driver roster from this file's side. Nothing writes it
+    // automatically: a dispatcher types the driver's name onto the won
+    // Opportunity by hand.
+    assignedDriver: ["assigned driver"],
   };
 
   // Filled in by resolveFieldIds() (called from "Test connection" and again
@@ -696,6 +715,252 @@
           });
         });
       });
+  }
+
+  // ---------------------------------------------------------------------
+  // 9. Driver Pay Statements (2026-11-03) — auto-computes a driver's
+  // commission straight from their own won Opportunities (job value x the
+  // Commission % already on their driver profile) over a date range,
+  // instead of hand-typing a number into the existing Driver Quarter
+  // object every quarter. Same job-value x commission-rate math, and the
+  // same "snapshot it so a later edit can't retroactively change a
+  // statement someone already generated" principle, as HookOps' own Pay
+  // Statement generator (app/routes/finance.py) — ported here as a
+  // judgment call about what "the same feature" should mean on this
+  // codebase's own terms, not a line-by-line port of that code.
+  //
+  // Storage is one new flat Custom Object, "pay_statements" — one record
+  // per generated statement, its line items serialized into a Line Items
+  // JSON field rather than a second linked object. There's no real
+  // parent/child relation exposed by this REST API (every "relation" in
+  // this file — Business Account -> Rate Table, Quarter -> Driver — is
+  // just a text field matched by name), and a second object only to hold
+  // a handful of rows per statement would add real surface for no benefit
+  // at this scale.
+  //
+  // Needs one new Opportunity field, created the first time "Set up Pay
+  // Statements" is clicked: "Assigned Driver" (plain TEXT, matched by
+  // exact name against Drivers -> Profiles' own driver name — same idiom
+  // as Business Account's Default Rate Table, and it sidesteps keeping a
+  // SINGLE_OPTIONS picklist in sync with the driver roster). PLAINLY:
+  // nothing in this codebase writes that field automatically. A
+  // dispatcher has to type the driver's name onto each won Opportunity by
+  // hand — typically while closing out the job — before that job will
+  // ever show up in a pay statement for them. The driver picker below
+  // only ever shows names already on file in Drivers -> Profiles, so a
+  // generated statement can't be typo'd onto the wrong driver from this
+  // side, but a typo on the Opportunity's own Assigned Driver field is a
+  // real failure mode this file can't catch — it just shows up as "0 jobs
+  // matched" in the preview, which is why that empty-state message below
+  // says to check the spelling.
+  //
+  // UNVERIFIED, same caveat as the rate engine above and this file's own
+  // top-of-file header: ensureOpportunityField's call for the new
+  // Assigned Driver field, and ensureObjectSchema/ensureObjectField's
+  // calls for the new pay_statements object, have never been run against
+  // a real token in this session. Click "Set up Pay Statements" once and
+  // read what it reports (created vs. already existed) before relying on
+  // this in front of a client — it's idempotent, same as "Set up rate
+  // engine," so re-clicking after a failure is safe.
+  // ---------------------------------------------------------------------
+
+  function ensurePayStatementsSetup(onStep) {
+    function step(label, fn) {
+      if (onStep) onStep(label);
+      return fn();
+    }
+    return step("Pay Statements object", function () {
+      return ensureObjectSchema(CONFIG.objectKeys.payStatements, { singular: "Pay Statement", plural: "Pay Statements" });
+    })
+      .then(function () {
+        return Promise.all([
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Driver Name", dataType: "TEXT" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Period Start", dataType: "DATE" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Period End", dataType: "DATE" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Status", dataType: "TEXT" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Job Count", dataType: "NUMERICAL" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Gross Job Value", dataType: "MONETORY" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Commission Pct Used", dataType: "NUMERICAL" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Commission Total", dataType: "MONETORY" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Adjustment Amount", dataType: "MONETORY" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Adjustment Note", dataType: "TEXT" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Total", dataType: "MONETORY" }),
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Generated At", dataType: "DATE" }),
+          // One job per line, serialized — see this block's own top
+          // comment for why this isn't a second linked Custom Object.
+          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Line Items JSON", dataType: "LARGE_TEXT" }),
+        ]);
+      })
+      .then(function () {
+        return step("Opportunity field (Assigned Driver)", function () {
+          return ensureOpportunityField({ name: "Assigned Driver", dataType: "TEXT" });
+        });
+      });
+  }
+
+  // Driver roster for the picker below, plus each driver's Commission %
+  // and Pay Type — the same driver_profiles object dashboard.js's Drivers
+  // -> Profiles tab already reads, just read here directly via
+  // listObjectRecords rather than importing dashboard.js's mapDriver
+  // (same no-shared-module reason as everything else duplicated between
+  // these two files).
+  function loadDriverRosterForPayStatements() {
+    return listObjectRecords(CONFIG.objectKeys.drivers).then(function (recs) {
+      return recs
+        .map(function (r) {
+          var p = r.properties || {};
+          return {
+            recordId: r.id,
+            name: p.driver_name || "",
+            payType: p.pay_type || "commission",
+            commissionPct: parseFloat(p.commission_pct),
+          };
+        })
+        .filter(function (d) { return d.name; });
+    });
+  }
+
+  // Every Opportunity ID already included in ANY existing Pay Statement
+  // for this driver, regardless of that statement's own period — so
+  // generating a second statement whose date range overlaps (or even just
+  // re-running the same range by mistake) can never double-pay a job a
+  // previous statement already covered. Nothing in GHL enforces this on
+  // its own; it's the same "exclude jobs already on a statement" rule
+  // HookOps' own generator enforces at the database level (NOT IN ... in
+  // app/routes/finance.py), ported here as a client-side check against
+  // every existing record instead.
+  function alreadyPaidOpportunityIds(driverName) {
+    return listObjectRecords(CONFIG.objectKeys.payStatements).then(function (recs) {
+      var ids = {};
+      recs.forEach(function (r) {
+        var p = r.properties || {};
+        if (String(p.driver_name || "").trim().toLowerCase() !== driverName.trim().toLowerCase()) return;
+        var items = [];
+        try { items = JSON.parse(p.line_items_json || "[]"); } catch (e) { items = []; }
+        items.forEach(function (it) { if (it && it.opportunityId) ids[it.opportunityId] = true; });
+      });
+      return ids;
+    });
+  }
+
+  // Scans the dispatch pipeline for this driver's won jobs in the given
+  // period. Filters cheaply first — status and updatedAt are already on
+  // the lightweight /opportunities/search rows loadAllOpportunities()
+  // returns, no extra calls — and only does a per-Opportunity GET (via
+  // mapWithConcurrency, the same primitive buildWoMap() and
+  // findDuplicateWorkOrders() above already use) on the subset that
+  // survives that filter, since Assigned Driver needs the full/reliable
+  // read (see getCustomField's own comment on why /opportunities/search's
+  // customFields payload isn't trustworthy). Deliberately cheaper than
+  // findDuplicateWorkOrders()'s brute-force full-pipeline GET, since this
+  // only needs to look at jobs that already match on status + date.
+  function scanOpportunitiesForDriverPay(driverName, periodStart, periodEnd, onProgress) {
+    var startMs = new Date(periodStart + "T00:00:00").getTime();
+    var endMs = new Date(periodEnd + "T23:59:59.999").getTime();
+    return resolveFieldIds()
+      .then(function () { return loadPipelines(); })
+      .then(function (pipelines) {
+        var pipeline = pipelines.filter(function (p) {
+          return (p.name || "").toLowerCase() === CONFIG.dispatchPipelineName.toLowerCase();
+        })[0];
+        if (!pipeline) throw new Error('No pipeline named "' + CONFIG.dispatchPipelineName + '" found in this GHL location.');
+        return loadAllOpportunities(pipeline.id).then(function (list) {
+          var candidates = list.filter(function (o) {
+            if (o.status !== "won") return false;
+            var ts = new Date(o.updatedAt || o.dateUpdated || "").getTime();
+            return !isNaN(ts) && ts >= startMs && ts <= endMs;
+          });
+          var assignedFieldIds = fieldIdsFor("assignedDriver");
+          return mapWithConcurrency(candidates, 4, function (o) { return getOpportunity(o.id); }, onProgress).then(function (fullOpps) {
+            var matched = [];
+            fullOpps.forEach(function (full) {
+              if (!full) return;
+              var assigned = getCustomField(full, assignedFieldIds);
+              if (String(assigned || "").trim().toLowerCase() !== driverName.trim().toLowerCase()) return;
+              matched.push({
+                opportunityId: full.id,
+                name: full.name,
+                updatedAt: full.updatedAt || full.dateUpdated || null,
+                jobValue: full.monetaryValue != null ? full.monetaryValue : 0,
+              });
+            });
+            return { pipelineName: pipeline.name, scanned: candidates.length, matched: matched };
+          });
+        });
+      });
+  }
+
+  // Combines the scan above with the driver's Commission % and the
+  // already-paid exclusion into the exact shape the preview/apply UI
+  // needs. Pure composition — no network calls beyond the two the two
+  // functions above already make.
+  function buildPayStatementPreview(driver, periodStart, periodEnd, onProgress) {
+    return Promise.all([
+      scanOpportunitiesForDriverPay(driver.name, periodStart, periodEnd, onProgress),
+      alreadyPaidOpportunityIds(driver.name),
+    ]).then(function (results) {
+      var scan = results[0];
+      var paidIds = results[1];
+      var pct = isNaN(driver.commissionPct) ? 0 : driver.commissionPct;
+      var included = [];
+      var excludedAlreadyPaid = 0;
+      scan.matched.forEach(function (job) {
+        if (paidIds[job.opportunityId]) {
+          excludedAlreadyPaid += 1;
+          return;
+        }
+        var commission = Math.round(job.jobValue * (pct / 100) * 100) / 100;
+        included.push({
+          opportunityId: job.opportunityId,
+          name: job.name,
+          updatedAt: job.updatedAt,
+          jobValue: job.jobValue,
+          commission: commission,
+        });
+      });
+      var grossJobValue = included.reduce(function (s, j) { return s + j.jobValue; }, 0);
+      var commissionTotal = included.reduce(function (s, j) { return s + j.commission; }, 0);
+      return {
+        driver: driver,
+        periodStart: periodStart,
+        periodEnd: periodEnd,
+        pipelineName: scan.pipelineName,
+        scanned: scan.scanned,
+        excludedAlreadyPaid: excludedAlreadyPaid,
+        jobs: included,
+        grossJobValue: Math.round(grossJobValue * 100) / 100,
+        commissionTotal: Math.round(commissionTotal * 100) / 100,
+      };
+    });
+  }
+
+  // Writes the statement — the only write this feature performs, gated
+  // behind the same "type APPLY to confirm" control section 5's AAA import
+  // uses. commission_pct_used snapshots the rate actually applied (not a
+  // live pointer to the driver's current Commission %), so a later change
+  // to that driver's profile can never retroactively change what this
+  // statement says they were paid for this period — same reasoning as
+  // Rate Table Used being stamped once on a job and never recomputed.
+  function applyPayStatement(preview, adjustmentAmount, adjustmentNote) {
+    var adj = adjustmentAmount || 0;
+    var total = Math.round((preview.commissionTotal + adj) * 100) / 100;
+    var today = new Date().toISOString().slice(0, 10);
+    return createObjectRecord(CONFIG.objectKeys.payStatements, {
+      name: preview.driver.name + " — " + preview.periodStart + " to " + preview.periodEnd,
+      driver_name: preview.driver.name,
+      period_start: preview.periodStart,
+      period_end: preview.periodEnd,
+      status: "final",
+      job_count: preview.jobs.length,
+      gross_job_value: preview.grossJobValue,
+      commission_pct_used: preview.driver.commissionPct,
+      commission_total: preview.commissionTotal,
+      adjustment_amount: adj,
+      adjustment_note: adjustmentNote || "",
+      total: total,
+      generated_at: today,
+      line_items_json: JSON.stringify(preview.jobs),
+    });
   }
 
   // GHL's REST API needs a custom object's schemaKey fully qualified as
@@ -1526,6 +1791,30 @@
     '</div>' +
     '</div>' +
 
+    '<div class="card" id="cardPayStatements"><h2>9. Driver Pay Statements</h2>' +
+    '<div class="cardDesc">Auto-computes a driver\'s commission from their own won Opportunities — job value &times; their Commission % (set on the driver\'s profile in Drivers &rarr; Profiles) — over a date range. <b>Needs every won Opportunity tagged with the new "Assigned Driver" field first</b> — type the driver\'s name onto the job exactly as it appears in Drivers &rarr; Profiles; nothing here writes that automatically. Nothing is written to GHL until you review the preview and type APPLY, and a job already paid on an earlier statement for this driver is excluded automatically.</div>' +
+    '<div class="btnRow"><button type="button" class="btn primary" id="btnSetupPayStatements">Set up Pay Statements</button></div>' +
+    '<div class="statusMsg" id="paySetupStatus"></div>' +
+
+    '<div style="margin-top:20px;">' +
+    '<div class="fieldRow">' +
+    '<div class="field"><label for="fPayDriver">Driver</label><select id="fPayDriver"><option value="">Click “Load drivers” &rarr;</option></select></div>' +
+    '<div class="field"><label>&nbsp;</label><button type="button" class="btn" id="btnPayLoadDrivers" style="width:100%;">Load drivers</button></div>' +
+    '</div>' +
+    '<div class="fieldRow">' +
+    '<div class="field"><label for="fPayStart">Period start</label><input type="date" id="fPayStart"></div>' +
+    '<div class="field"><label for="fPayEnd">Period end</label><input type="date" id="fPayEnd"></div>' +
+    '</div>' +
+    '<div class="btnRow"><button type="button" class="btn primary" id="btnPayPreview">Preview</button></div>' +
+    '<div class="progressWrap" id="payProgress"><div class="progressBar"><div id="payProgressBar"></div></div><div class="progressLabel" id="payProgressLabel"></div></div>' +
+    '<div class="statusMsg" id="payStatus"></div>' +
+    '<div id="paySummary"></div>' +
+    '<div id="payTableWrap"></div>' +
+    '<div id="payAdjustWrap"></div>' +
+    '<div id="payApplyWrap"></div>' +
+    '</div>' +
+    '</div>' +
+
     '<div class="foot-note" id="footNote">Field IDs for AAA reconciliation on the Opportunity are specific to this GHL location — see the note at the top of setup.js before reusing this for a different client.</div>' +
     "</div>";
 
@@ -1662,7 +1951,10 @@
      "btnSetupRateEngine", "btnLoadRates", "rateSetupStatus",
      "servicesTableWrap", "fSvcName", "fSvcCategory", "fSvcUnit", "fSvcPrice", "btnSaveService", "btnCancelSvcEdit", "svcStatus",
      "ratesTableWrap", "fRtName", "fRtRounding", "fRtBase", "fRtPerMile", "fRtIncluded", "fRtMin", "fRtAfterHours", "fRtFlatbed", "fRtIsCurrent", "btnSaveRateTable", "btnCancelRtEdit", "rtStatus",
-     "acctsTableWrap", "fAcctName", "fAcctType", "fAcctRateTable", "btnSaveAcct", "btnCancelAcctEdit", "acctStatus"
+     "acctsTableWrap", "fAcctName", "fAcctType", "fAcctRateTable", "btnSaveAcct", "btnCancelAcctEdit", "acctStatus",
+     "btnSetupPayStatements", "paySetupStatus",
+     "fPayDriver", "btnPayLoadDrivers", "fPayStart", "fPayEnd", "btnPayPreview",
+     "payProgress", "payProgressBar", "payProgressLabel", "payStatus", "paySummary", "payTableWrap", "payAdjustWrap", "payApplyWrap"
     ].forEach(function (id) { els[id] = root.querySelector("#" + id); });
 
     // ---- Prefill from CONFIG (whatever was pasted in window.CJT_CONFIG) ----
@@ -2395,6 +2687,164 @@
       }).catch(function (err) {
         showStatus(els.acctStatus, "err", "Couldn't save: " + err.message);
       }).finally(function () { els.btnSaveAcct.disabled = false; });
+    });
+
+    // ---- 9. Driver Pay Statements ---------------------------------------
+    var payDrivers = [];
+    var lastPayPreview = null;
+
+    function requirePayConn() {
+      if (!CONFIG.locationId || !CONFIG.privateToken) {
+        showStatus(els.paySetupStatus, "err", "Fill in Location ID and Private Integration Token above first (section 1), then come back here.");
+        return false;
+      }
+      return true;
+    }
+
+    els.btnSetupPayStatements.addEventListener("click", function () {
+      if (!requirePayConn()) return;
+      Object.assign(CONFIG, liveConfigFromForm());
+      els.btnSetupPayStatements.disabled = true;
+      showStatus(els.paySetupStatus, "info", "Starting…");
+      ensurePayStatementsSetup(function (label) { showStatus(els.paySetupStatus, "info", label + "…"); })
+        .then(function () {
+          showStatus(els.paySetupStatus, "ok", "Pay Statements is set up. Load drivers below and generate a statement.");
+        })
+        .catch(function (err) {
+          showStatus(els.paySetupStatus, "err", "Setup failed: " + err.message + " — safe to click “Set up Pay Statements” again, it skips anything already created.");
+        })
+        .finally(function () { els.btnSetupPayStatements.disabled = false; });
+    });
+
+    els.btnPayLoadDrivers.addEventListener("click", function () {
+      if (!requirePayConn()) return;
+      Object.assign(CONFIG, liveConfigFromForm());
+      els.btnPayLoadDrivers.disabled = true;
+      loadDriverRosterForPayStatements()
+        .then(function (drivers) {
+          payDrivers = drivers;
+          els.fPayDriver.innerHTML = drivers.length
+            ? drivers.map(function (d) {
+                var tag = d.payType !== "commission" ? " (" + esc(d.payType) + ")" : (isNaN(d.commissionPct) ? " (no %)" : " (" + d.commissionPct + "%)");
+                return '<option value="' + esc(d.name) + '">' + esc(d.name) + tag + "</option>";
+              }).join("")
+            : '<option value="">No drivers found — add one in Drivers first</option>';
+          showStatus(els.payStatus, "ok", "Loaded " + drivers.length + " driver(s).");
+        })
+        .catch(function (err) { showStatus(els.payStatus, "err", "Couldn't load drivers: " + err.message); })
+        .finally(function () { els.btnPayLoadDrivers.disabled = false; });
+    });
+
+    function setPayProgress(shown, done, total, label) {
+      els.payProgress.className = "progressWrap" + (shown ? " show" : "");
+      if (total) els.payProgressBar.style.width = Math.round((done / total) * 100) + "%";
+      els.payProgressLabel.textContent = label || (total ? done + " / " + total : "");
+    }
+
+    function renderPayPreview(preview) {
+      els.paySummary.innerHTML =
+        '<div class="summaryGrid">' +
+        '<div class="summaryTile matched"><div class="n">' + preview.jobs.length + '</div><div class="l">Jobs</div></div>' +
+        '<div class="summaryTile"><div class="n">' + money(preview.grossJobValue) + '</div><div class="l">Job value</div></div>' +
+        '<div class="summaryTile"><div class="n">' + money(preview.commissionTotal) + '</div><div class="l">Commission</div></div>' +
+        '<div class="summaryTile"><div class="n">' + preview.excludedAlreadyPaid + '</div><div class="l">Already paid</div></div>' +
+        "</div>";
+
+      if (preview.jobs.length === 0) {
+        els.payTableWrap.innerHTML = '<div class="hint">No won jobs found for ' + esc(preview.driver.name) + ' in this period with “Assigned Driver” set to this name — check the spelling on the Opportunity, and that “Assigned Driver” has actually been filled in.</div>';
+      } else {
+        els.payTableWrap.innerHTML =
+          '<div class="tableWrap"><table><thead><tr><th>Job</th><th>Closed</th><th>Job value</th><th>Commission</th></tr></thead><tbody>' +
+          preview.jobs.map(function (j) {
+            return "<tr><td>" + esc(j.name) + "</td><td>" + esc((j.updatedAt || "").slice(0, 10)) + "</td><td>" + money(j.jobValue) + "</td><td>" + money(j.commission) + "</td></tr>";
+          }).join("") + "</tbody></table></div>";
+      }
+
+      els.payAdjustWrap.innerHTML = preview.jobs.length === 0 ? "" :
+        '<div class="fieldRow" style="margin-top:12px;">' +
+        '<div class="field"><label for="fPayAdjustAmt">Adjustment ($, +/-)</label><input type="number" step="0.01" id="fPayAdjustAmt" value="0"></div>' +
+        '<div class="field"><label for="fPayAdjustNote">Adjustment note</label><input type="text" id="fPayAdjustNote" placeholder="e.g. fuel reimbursement"></div>' +
+        "</div>";
+
+      function currentTotal() {
+        var amtEl = els.payAdjustWrap.querySelector("#fPayAdjustAmt");
+        var adjAmt = amtEl ? parseFloat(amtEl.value) || 0 : 0;
+        return Math.round((preview.commissionTotal + adjAmt) * 100) / 100;
+      }
+
+      if (preview.jobs.length === 0) {
+        els.payApplyWrap.innerHTML = '<div class="hint">Nothing to apply — no jobs matched.</div>';
+        return;
+      }
+
+      els.payApplyWrap.innerHTML =
+        '<div class="statusMsg show info" id="payTotalMsg">Total to pay: ' + money(currentTotal()) + "</div>" +
+        '<div class="applyConfirm"><label for="payApplyConfirmInput" style="margin:0;font-size:12.5px;">Type APPLY to confirm writing this statement to GHL:</label>' +
+        '<input type="text" id="payApplyConfirmInput"></div>' +
+        '<div class="btnRow"><button type="button" class="btn danger" id="btnPayApply" disabled>Apply to GHL</button></div>';
+
+      var confirmInput = els.payApplyWrap.querySelector("#payApplyConfirmInput");
+      var applyBtn = els.payApplyWrap.querySelector("#btnPayApply");
+      confirmInput.addEventListener("input", function () {
+        applyBtn.disabled = confirmInput.value.trim().toUpperCase() !== "APPLY";
+      });
+      var amtEl = els.payAdjustWrap.querySelector("#fPayAdjustAmt");
+      if (amtEl) {
+        amtEl.addEventListener("input", function () {
+          var totalMsg = els.payApplyWrap.querySelector("#payTotalMsg");
+          if (totalMsg) totalMsg.textContent = "Total to pay: " + money(currentTotal());
+        });
+      }
+      applyBtn.addEventListener("click", function () {
+        applyBtn.disabled = true;
+        confirmInput.disabled = true;
+        var adjAmt = amtEl ? parseFloat(amtEl.value) || 0 : 0;
+        var noteEl = els.payAdjustWrap.querySelector("#fPayAdjustNote");
+        var adjNote = noteEl ? noteEl.value.trim() : "";
+        applyPayStatement(preview, adjAmt, adjNote)
+          .then(function () {
+            showStatus(els.payStatus, "ok", "Done. Pay statement for " + preview.driver.name + " written to GHL.");
+            els.payApplyWrap.innerHTML = "";
+          })
+          .catch(function (err) {
+            showStatus(els.payStatus, "err", "Apply failed: " + err.message);
+            applyBtn.disabled = false;
+            confirmInput.disabled = false;
+          });
+      });
+    }
+
+    els.btnPayPreview.addEventListener("click", function () {
+      if (!requirePayConn()) return;
+      Object.assign(CONFIG, liveConfigFromForm());
+      var driverName = els.fPayDriver.value;
+      var driver = payDrivers.filter(function (d) { return d.name === driverName; })[0];
+      var start = els.fPayStart.value;
+      var end = els.fPayEnd.value;
+      hideStatus(els.payStatus);
+      els.paySummary.innerHTML = "";
+      els.payTableWrap.innerHTML = "";
+      els.payAdjustWrap.innerHTML = "";
+      els.payApplyWrap.innerHTML = "";
+      if (!driver) { showStatus(els.payStatus, "err", "Click “Load drivers” and pick a driver first."); return; }
+      if (!start || !end) { showStatus(els.payStatus, "err", "Pick a period start and end date."); return; }
+      if (isNaN(driver.commissionPct)) { showStatus(els.payStatus, "err", driver.name + " has no Commission % set on their driver profile — set it there first."); return; }
+      els.btnPayPreview.disabled = true;
+      setPayProgress(true, 0, 1, "Scanning Opportunities…");
+      buildPayStatementPreview(driver, start, end, function (done, total) {
+        setPayProgress(true, done, total, "Scanning Opportunities… " + done + " / " + total);
+      })
+        .then(function (preview) {
+          lastPayPreview = preview;
+          setPayProgress(false, 0, 0, "");
+          showStatus(els.payStatus, "info", "Scanned " + preview.scanned + " won job(s) in “" + preview.pipelineName + "” closed in this period — " + preview.jobs.length + " assigned to " + driver.name + ". Nothing written yet — review below.");
+          renderPayPreview(preview);
+        })
+        .catch(function (err) {
+          setPayProgress(false, 0, 0, "");
+          showStatus(els.payStatus, "err", err.message);
+        })
+        .finally(function () { els.btnPayPreview.disabled = false; });
     });
 
     // Auto-load if a connection is already configured (e.g. this page was
