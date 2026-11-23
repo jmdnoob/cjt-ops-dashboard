@@ -214,6 +214,10 @@
     // "not found," it means the field's name changed or the token lacks
     // the Custom Fields scope — not that this fallback needs updating.
     aaaPaymentDifference: [],
+    // Payment Status (Unpaid/Reconciled/Paid single-select) -- new field
+    // added 2026-11-23 for the reconciliation-status workflow. No fallback
+    // ID: this is a client-created field, resolved purely by name.
+    paymentStatus: [],
     // Read-only inputs to the rate-engine recompute (8. Rates & Services) —
     // never written by this file. No fallback IDs for any of these:
     // towMiles/flatbedRequired/dispatchSource already exist on CJ Taylor
@@ -251,6 +255,7 @@
     aaaPayDate: ["aaa pay date"],
     aaaPaidTowMiles: ["aaa paid tow miles"],
     aaaPaymentDifference: ["aaa payment difference"],
+    paymentStatus: ["payment status"],
     towMiles: ["tow miles"],
     flatbedRequired: ["flatbed required", "flatbed"],
     // dispatchSource is read-only here (never written) — it already exists
@@ -1351,6 +1356,14 @@
     // subtraction (e.g. 19.999999999998) and keeps the export looking like
     // a normal dollar amount (e.g. "-19.00").
     if (item.diff !== null && fieldId("aaaPaymentDifference")) customFields.push({ id: fieldId("aaaPaymentDifference"), fieldValue: item.diff.toFixed(2) });
+    // Reconciliation-status workflow (2026-11-23): the moment this import
+    // writes a Pay Date onto an Opportunity, that job has been reconciled
+    // against an AAA statement -- flip Payment Status from Unpaid straight
+    // to "Reconciled" here. The later Reconciled -> Paid move is NOT done
+    // here: that is a deliberate, human-confirmed step (once AAA's actual
+    // deposit is checked against the statement) done in bulk from the
+    // reconciled-items list tool, not automatically during import.
+    if (item.payDate && fieldId("paymentStatus")) customFields.push({ id: fieldId("paymentStatus"), fieldValue: "Reconciled" });
     if (customFields.length === 0) return Promise.resolve({ skipped: true });
     return ghlApi("/opportunities/" + item.opp.id, {
       method: "PUT",
@@ -2002,6 +2015,7 @@
       aaaPayDate: "AAA Pay Date",
       aaaPaidTowMiles: "AAA Paid Tow Miles",
       aaaPaymentDifference: "AAA Payment Difference",
+      paymentStatus: "Payment Status",
     };
     function renderFieldMap(resolved) {
       var rows = Object.keys(FIELD_LABELS).map(function (key) {
