@@ -1,32 +1,40 @@
 /*!
- * CJT Driver Onboarding — add/edit a driver profile (custom_objects.driver_profiles)
- * and, for a brand-new driver, automatically drop a new Opportunity into the
- * "Driver Onboarding" Pipeline. Hosted on GitHub next to dashboard.js/setup.js,
- * loaded the same way (jsDelivr).
+ * CJT Driver Onboarding — its own standalone page (split out of setup.js
+ * 2026-11-23 so dispatcher-level staff can be granted this page without
+ * ever touching Setup's billing/connection/security config). Add/edit a
+ * driver profile (custom_objects.driver_profiles) and, for a brand-new
+ * driver, automatically drop a new Opportunity into the Onboarding
+ * Pipeline. Also provisions the driver-profile fields this page's own
+ * form needs (see "Set up driver fields" at the top of the page) — that
+ * used to be setup.js's own "10. Driver Onboarding Setup" card; it's
+ * folded into this file now so Drivers is fully self-contained. Hosted on
+ * GitHub next to dashboard.js/setup.js, loaded the same way (jsDelivr).
  *
  * BEFORE THIS WORKS:
- *   1. On the Setup page, run "10. Driver Onboarding Setup" once (adds the
- *      rest of the fields below to the Drivers object — everything except
- *      the driver's own name field, which already exists).
- *   2. Create the "Driver Onboarding" Pipeline by hand in Settings ->
- *      Pipelines, with these exact stages, in order: Applied, Documents
- *      Submitted, Background Check, Approved, Active (plus a separate
- *      Rejected stage). This file can't create a Pipeline itself — only
- *      Custom Object schemas/fields are reachable through the API setup.js
- *      otherwise uses.
+ *   1. Load this page once and click "Set up driver fields" (idempotent —
+ *      safe to click again later; it only creates what's missing).
+ *   2. Create the "Onboarding" Pipeline by hand in Settings -> Pipelines
+ *      (this file can't create a Pipeline or its stages itself — only
+ *      Custom Object/field endpoints are reachable through the API this
+ *      repo otherwise uses). The exact stage names don't matter beyond
+ *      the first one: whatever CONFIG.onboardingFirstStageName names
+ *      (default "Applied") is where a new driver's Opportunity lands —
+ *      CJ Taylor Towing's own Pipeline is Applied / Document Submitted /
+ *      Background Check / Approved / Rejected.
  *
  * ============================================================================
- * WHAT TO PASTE INTO THE "Driver Onboarding" GHL PAGE (Website/Funnel
- * builder -> Custom HTML/CSS/JS element). Use a Custom Menu Link to this
- * page's own GHL URL, set to "Embedded iframe" — same idea as the Setup
- * page, since this reads/writes live GHL data with the same token.
+ * WHAT TO PASTE INTO THE "Drivers" GHL PAGE (Website/Funnel builder ->
+ * Custom HTML/CSS/JS element). Use a Custom Menu Link to this page's own
+ * GHL URL, set to "Embedded iframe". Unlike Setup, this page is meant to
+ * be given to dispatcher-level staff — set its Role-Based Visibility to
+ * whichever roles should manage drivers, not Admins-only.
  *
  *   <div id="cjt-driver-onboarding-root"></div>
  *   <script>
  *     window.CJT_CONFIG = {
  *       locationId: "THEIR_GHL_LOCATION_ID",
  *       privateToken: "THEIR_GHL_PRIVATE_INTEGRATION_TOKEN",
- *       onboardingPipelineName: "Driver Onboarding",
+ *       onboardingPipelineName: "Onboarding",
  *       onboardingFirstStageName: "Applied"
  *     };
  *   </script>
@@ -39,29 +47,20 @@
  * opens straight into that driver's own form instead of a blank one.
  *
  * ============================================================================
- * UNVERIFIED — same caveat as setup.js's own object/field *creation* calls:
- * nothing in this file has been run against a real token in this session.
- * Specifically unverified:
- *   - Field-key resolution for the driver's own name field. This file reads
- *     the live field list and matches it by name ("Driver Name"/"Driver's
- *     Name"/"Drivers Name"/bare "Name"), the same by-name idiom
- *     resolveFieldIds() uses for Opportunity fields elsewhere in this repo
- *     — but if that lookup finds nothing, it falls back to the literal key
- *     "driver_name", since that's the key dashboard.js/setup.js already
- *     assume everywhere else for this same object. Open the browser console
- *     after saving your first test driver and confirm the name actually
- *     shows up correctly in GHL before trusting this with a real driver.
- *   - Opportunity creation (createOnboardingOpportunity below) — written
- *     against GHL's documented POST /opportunities/ shape, but this repo
- *     has never created an Opportunity from code before (everything else
- *     only ever reads them). If your GHL account requires a linked Contact
- *     on every Opportunity, this call will fail with a clear error from
- *     GHL rather than silently creating something wrong — the driver
- *     record itself still saves fine either way, this step just reports
- *     the failure separately so you know to create that Opportunity by
- *     hand for that one driver.
- * Test this end-to-end on one throwaway test driver first, same as every
- * other live-GHL-write tool in this repo.
+ * CONFIRMED live 2026-11-23 against CJ Taylor Towing's real account, via
+ * a throwaway test driver + test Opportunity (both created, verified, and
+ * deleted in the same session):
+ *   - Field-key resolution for the driver's own name field (resolves to
+ *     the real existing "Driver Name" field by name; the "driver_name"
+ *     fallback was never actually needed on this account but stays as a
+ *     safety net).
+ *   - The 12 new driver-profile fields this form reads/writes (Email,
+ *     Phone, Onboarding Status, Employment Type, Pay Type, Commission %,
+ *     Hourly Rate, License/Insurance/MVR/Certification/Training Status) —
+ *     created for real on this account's Drivers object.
+ *   - Opportunity creation (createOnboardingOpportunity below) — POST
+ *     /opportunities/ with no contactId at all succeeds fine
+ *     ("contactId": null in the response); no linked Contact is required.
  * ============================================================================
  */
 (function () {
@@ -75,7 +74,7 @@
     ghlBase: "",
     locationId: "",
     privateToken: "",
-    onboardingPipelineName: "Driver Onboarding",
+    onboardingPipelineName: "Onboarding",
     onboardingFirstStageName: "Applied",
     objectKeys: { drivers: "driver_profiles" },
     apiVersions: { pipelines: "v3", objects: "v3" },
@@ -177,8 +176,121 @@
     });
   }
   function fetchObjectFieldDefs(shortKey) {
-    return ghlApi("/objects/" + objectSchemaKey(shortKey) + "/fields", { version: CONFIG.apiVersions.objects })
-      .then(function (res) { return (res && (res.fields || res)) || []; });
+    var objectKey = objectSchemaKey(shortKey);
+    return ghlApi("/custom-fields/object-key/" + objectKey + "?locationId=" + CONFIG.locationId, { version: CONFIG.apiVersions.objects })
+      .then(function (res) { return (res && res.fields) || []; });
+  }
+
+  // Field folders are required by the real create-field endpoint
+  // (parentId) -- fetched/created once per object key and cached. Same
+  // fix/shape as setup.js's own getOrCreateFieldFolder/ensureObjectField
+  // (CONFIRMED live 2026-11-23 against this location's real
+  // driver_profiles object) -- duplicated here rather than shared, same
+  // no-shared-module reason as everything else in this file.
+  var fieldFolderCache = {};
+  function getOrCreateFieldFolder(objectKey, folderName) {
+    var cacheKey = objectKey + "::" + folderName;
+    if (fieldFolderCache[cacheKey]) return fieldFolderCache[cacheKey];
+    var p = ghlApi("/custom-fields/object-key/" + objectKey + "?locationId=" + CONFIG.locationId, { version: CONFIG.apiVersions.objects })
+      .then(function (res) {
+        var folders = (res && res.folders) || [];
+        var existing = folders.filter(function (f) { return String(f.name || "").trim().toLowerCase() === folderName.trim().toLowerCase(); })[0];
+        if (existing) return existing.id;
+        return ghlApi("/custom-fields/folder", {
+          method: "POST",
+          version: CONFIG.apiVersions.objects,
+          body: { locationId: CONFIG.locationId, name: folderName, objectKey: objectKey },
+        }).then(function (res2) { return res2.folder.id; });
+      });
+    fieldFolderCache[cacheKey] = p;
+    return p;
+  }
+  function keyToLabel(key) {
+    return String(key).split("_").map(function (w) {
+      return w ? w.charAt(0).toUpperCase() + w.slice(1) : w;
+    }).join(" ");
+  }
+  function ensureObjectField(shortKey, fieldDef, folderName) {
+    var objectKey = objectSchemaKey(shortKey);
+    return ghlApi("/custom-fields/object-key/" + objectKey + "?locationId=" + CONFIG.locationId, { version: CONFIG.apiVersions.objects })
+      .then(function (res) {
+        var existing = (res && res.fields) || [];
+        var already = existing.some(function (f) { return String(f.name || "").trim().toLowerCase() === fieldDef.name.trim().toLowerCase(); });
+        if (already) return { created: false };
+        return getOrCreateFieldFolder(objectKey, folderName || "Driver Info").then(function (parentId) {
+          var snakeKey = fieldDef.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+          var body = {
+            locationId: CONFIG.locationId,
+            name: fieldDef.name,
+            showInForms: true,
+            dataType: fieldDef.dataType,
+            fieldKey: objectKey + "." + snakeKey,
+            objectKey: objectKey,
+            parentId: parentId,
+          };
+          if (fieldDef.picklistOptions && fieldDef.picklistOptions.length) {
+            body.options = fieldDef.picklistOptions.map(function (key) {
+              return { key: key, label: (fieldDef.optionLabels && fieldDef.optionLabels[key]) || keyToLabel(key) };
+            });
+          }
+          return ghlApi("/custom-fields/", { method: "POST", version: CONFIG.apiVersions.objects, body: body })
+            .then(function () { return { created: true }; });
+        });
+      });
+  }
+
+  // Provisions every field this page's own form reads/writes on the
+  // Drivers object (everything except the driver's own name field, which
+  // already exists -- see resolveDriverFields()'s own comment on why this
+  // never tries to create that one under a guessed name). Idempotent --
+  // safe to click more than once; each ensureObjectField call checks
+  // before creating. CONFIRMED live 2026-11-23 -- this exact set of 12
+  // fields was created this way against CJ Taylor Towing's real account.
+  function ensureDriverFieldsSetup(onStep) {
+    function step(label, fn) {
+      if (onStep) onStep(label);
+      return fn();
+    }
+    return step("Driver profile fields", function () {
+      return Promise.all([
+        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Email", dataType: "TEXT" }),
+        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Phone", dataType: "TEXT" }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Onboarding Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["onboarding", "active", "suspended"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Employment Type", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["full_time", "part_time", "weekend"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Pay Type", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["commission", "hourly"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Commission Pct", dataType: "NUMERICAL" }),
+        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Hourly Rate", dataType: "MONETORY" }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "License Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["on_file", "missing", "expired"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Insurance Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["on_file", "missing", "expired"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "MVR Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["on_file", "missing", "expired"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Certification Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["on_file", "missing", "expired"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Training Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["not_started", "in_progress", "complete"],
+        }),
+      ]);
+    });
   }
 
   function loadPipelines() {
@@ -239,7 +351,7 @@
         });
         if (match) keys[fieldKey] = fieldWriteKey(match);
         else if (FIELD_KEY_FALLBACKS[fieldKey]) keys[fieldKey] = FIELD_KEY_FALLBACKS[fieldKey];
-        else keys[fieldKey] = null; // not created yet — run "10. Driver Onboarding Setup" on the Setup page
+        else keys[fieldKey] = null; // not created yet — click "Set up driver fields" above
       });
       resolvedDriverFields = keys;
       return keys;
@@ -307,7 +419,10 @@
     '#cjt-driver-onboarding-root .donStatus.ok{color:var(--don-good)}',
     '#cjt-driver-onboarding-root .donStatus.err{color:var(--don-crit)}',
     '#cjt-driver-onboarding-root .donStatus.warn{color:#b45309}',
-    '#cjt-driver-onboarding-root .donHint{font-size:11.5px;color:var(--don-text-dim);margin-top:3px;line-height:1.4}'
+    '#cjt-driver-onboarding-root .donHint{font-size:11.5px;color:var(--don-text-dim);margin-top:3px;line-height:1.4}',
+    '#cjt-driver-onboarding-root .donSetupBox{background:var(--don-panel);border:1px dashed var(--don-border);border-radius:12px;padding:12px 16px;margin-bottom:18px}',
+    '#cjt-driver-onboarding-root .donSetupBox summary{font-size:12.5px;font-weight:700;cursor:pointer;color:var(--don-text-dim)}',
+    '#cjt-driver-onboarding-root .donSetupDesc{font-size:11.5px;color:var(--don-text-dim);line-height:1.5;margin:8px 0}'
   ].join("\n");
 
   function esc(s) {
@@ -338,6 +453,11 @@
     var isEdit = !!driverId;
 
     root.innerHTML =
+      '<details class="donSetupBox"><summary>Admin: driver field setup</summary>' +
+      '<div class="donSetupDesc">One-time, idempotent — creates whichever of the driver-profile fields this form needs don\'t already exist on the Drivers object yet. Safe to click again later; it skips anything already created.</div>' +
+      '<div class="btnRow"><button type="button" class="btn" id="donSetupBtn">Set up driver fields</button></div>' +
+      '<div class="donStatus" id="donSetupStatus"></div>' +
+      '</details>' +
       '<h2 id="donHeading"></h2>' +
       '<div class="donSub" id="donSub"></div>' +
       '<form id="donForm">' +
@@ -378,7 +498,8 @@
       '</form>';
 
     var els = {};
-    ["donHeading", "donSub", "donForm", "donName", "donEmail", "donPhone", "donEmploymentType", "donOnboardingStatus",
+    ["donSetupBtn", "donSetupStatus",
+     "donHeading", "donSub", "donForm", "donName", "donEmail", "donPhone", "donEmploymentType", "donOnboardingStatus",
      "donPayType", "donCommissionWrap", "donCommissionPct", "donHourlyWrap", "donHourlyRate", "donPayHint",
      "donLicenseStatus", "donInsuranceStatus", "donMvrStatus", "donCertificationStatus", "donSubmit", "donStatus"]
       .forEach(function (id) { els[id] = root.querySelector("#" + id); });
@@ -394,8 +515,8 @@
       els.donCommissionWrap.style.display = hourly ? "none" : "";
       els.donHourlyWrap.style.display = hourly ? "" : "none";
       els.donPayHint.textContent = hourly
-        ? "Note: the Pay Statements generator (Setup page, section 9) only computes commission-based pay today — an hourly driver's rate is stored here for now, not yet paid out automatically."
-        : "Used by the Pay Statements generator (Setup page, section 9): job value × this %, across that driver's own won Opportunities tagged with their name.";
+        ? "Note: the Pay Statements generator (its own page, pay-statements.js) only computes commission-based pay today — an hourly driver's rate is stored here for now, not yet paid out automatically."
+        : "Used by the Pay Statements generator (its own page, pay-statements.js): job value × this %, across that driver's own won Opportunities tagged with their name.";
     }
     els.donPayType.addEventListener("change", syncPayTypeUI);
     syncPayTypeUI();
@@ -408,8 +529,29 @@
     if (!CONFIG.locationId || !CONFIG.privateToken) {
       showStatus("err", "Missing locationId/privateToken in CJT_CONFIG for this page.");
       els.donSubmit.disabled = true;
+      els.donSetupBtn.disabled = true;
       return;
     }
+
+    els.donSetupBtn.addEventListener("click", function () {
+      els.donSetupBtn.disabled = true;
+      els.donSetupStatus.className = "donStatus info";
+      els.donSetupStatus.textContent = "Starting…";
+      ensureDriverFieldsSetup(function (label) {
+        els.donSetupStatus.className = "donStatus info";
+        els.donSetupStatus.textContent = label + "…";
+      })
+        .then(function () {
+          els.donSetupStatus.className = "donStatus ok";
+          els.donSetupStatus.textContent = "Driver profile fields are set up.";
+          resolvedDriverFields = null; // force a fresh resolve now that new fields may exist
+        })
+        .catch(function (err) {
+          els.donSetupStatus.className = "donStatus err";
+          els.donSetupStatus.textContent = "Setup failed: " + err.message + " — safe to click again, it skips anything already created.";
+        })
+        .finally(function () { els.donSetupBtn.disabled = false; });
+    });
 
     var fieldKeys = null;
     var existingRecord = null;

@@ -35,10 +35,12 @@
  * serving stale code until another Release is cut. "@main" always tracks
  * the newest commit on the main branch directly and has none of this trap.
  *
- * Optional: extensionRepo/extensionAsset in CJT_CONFIG control the
- * "7. AAA Work Order Extractor" download button (section 7 below) —
- * defaults to this same GitHub repo's Releases if omitted, so most
- * clients never need to set these.
+ * The AAA Work Order Extractor browser-extension download, driver
+ * onboarding, driver pay statements, and Trucks & Maintenance each live on
+ * their own standalone GHL page now (extension-download.js,
+ * driver-onboarding.js, pay-statements.js) — role-separated from this
+ * admin/billing page on purpose, so dispatcher-level staff can be granted
+ * those pages without ever touching Connection/Security/Rates here.
  *
  * After changing anything here, use "Generate dashboard snippet" at the
  * bottom of the Connection section and paste the updated block onto BOTH
@@ -93,7 +95,7 @@
  *     Opportunity individually, same cost profile as the old pre-2026-10-08
  *     buildWoMap().
  *   - ensureRateEngineSetup() / ensureObjectSchema() / ensureObjectField() /
- *     ensureOpportunityField() ("8. Rates & Services", 2026-10-15) — object/
+ *     ensureOpportunityField() ("7. Rates & Services", 2026-10-15) — object/
  *     field *creation* calls, as opposed to the already-proven /objects/
  *     .../records read/write calls everything else in this file reuses.
  *     Written against GHL's documented Objects v3 shape, but never run
@@ -120,38 +122,20 @@
     locationId: "",
     privateToken: "",
     dispatchPipelineName: "Towing Dispatch",
-    // Driver Onboarding (2026-11-23) -- see "10. Driver Onboarding Setup"
-    // below. This Pipeline has to be created by hand in GHL Settings ->
-    // Pipelines (the Objects/Fields API this file otherwise uses to create
-    // things can't create a Pipeline or its stages) with these exact stage
-    // names, in this order: Applied, Documents Submitted, Background
-    // Check, Approved, Active (plus a separate "Rejected" stage for
-    // anyone who doesn't make it through). driver-onboarding.js drops a
-    // new Opportunity into whichever stage name matches
-    // onboardingFirstStageName the moment a new driver is saved.
-    onboardingPipelineName: "Driver Onboarding",
-    onboardingFirstStageName: "Applied",
     baseTowRate: 85,
     mileageRate: 3,
     setupUrl: "",
     passcodeHash: "",
     idleLockMinutes: 10,
-    // Where the AAA Work Order Extractor browser-extension zip is published
-    // as a GitHub Release asset — same repo this file is hosted in by
-    // default, but overridable per deployment (e.g. a reseller's own
-    // fork/org). See "7. Extension download" below and README.md
-    // "Distributing the extension" for the release/asset naming convention
-    // this points at.
-    //
-    // As of 2026-10-15 the extension talks to a shared cloud bridge
-    // (Cloud Run) instead of a per-machine native-messaging host, so there
-    // is no more installer, no OS-specific build, and no GHL token ever
-    // touches the install — one zip works identically on Mac, Windows, and
-    // Linux. Unversioned filename (same reasoning as the old Mac/Windows
-    // assets): publish a new GitHub Release with a zip named exactly this,
-    // and the download button here picks it up with no code change.
+    // Which GitHub org/repo to load dashboard.js/setup.js from via jsDelivr
+    // in the snippet "4. Generate dashboard snippet" builds below -- same
+    // repo this file is hosted in by default, but overridable per
+    // deployment (e.g. a reseller's own fork/org). The AAA Work Order
+    // Extractor browser-extension download itself now lives on its own
+    // standalone page (extension-download.js), which keeps its own copy
+    // of this plus extensionAsset for the Release zip's filename -- see
+    // README.md "Distributing the extension".
     extensionRepo: "jmdnoob/cjt-ops-dashboard",
-    extensionAsset: "AAA-GHL-Extractor.zip",
     objectKeys: {
       drivers: "driver_profiles",
       fleet: "trucks",
@@ -161,7 +145,7 @@
       // No "aaa" key — AAA payment data lives on the Opportunity only, not
       // in a Custom Object (see the REMOVED note at the top of this file).
       //
-      // Rate engine (2026-10-15) — see "8. Rates & Services" below. These
+      // Rate engine (2026-10-15) — see "7. Rates & Services" below. These
       // ARE reference/config data (like drivers/training above), not
       // per-job data, so Custom Objects are the right fit — the "no
       // duplicate object" rule only ever applied to AAA payment data living
@@ -169,11 +153,6 @@
       rateTables: "rate_tables",
       services: "services",
       businessAccounts: "business_accounts",
-      // Driver Pay Statements (2026-11-03) — see "9. Driver Pay Statements"
-      // below. One flat object per generated statement (line items live in
-      // its own Line Items JSON field, not a second linked object — see
-      // that section's comment for why).
-      payStatements: "pay_statements",
     },
     apiVersions: {
       pipelines: "v3",
@@ -229,7 +208,7 @@
     // added 2026-11-23 for the reconciliation-status workflow. No fallback
     // ID: this is a client-created field, resolved purely by name.
     paymentStatus: [],
-    // Read-only inputs to the rate-engine recompute (8. Rates & Services) —
+    // Read-only inputs to the rate-engine recompute (7. Rates & Services) —
     // never written by this file. No fallback IDs for any of these:
     // towMiles/flatbedRequired/dispatchSource already exist on CJ Taylor
     // Towing's location (the extractor created them) but this file has
@@ -242,10 +221,10 @@
     dispatchSource: [],
     serviceType: [],
     rateTableUsed: [],
-    // "9. Driver Pay Statements" below creates this fresh on a location's
-    // first run (ensureOpportunityField), same no-fallback-ID situation as
-    // serviceType/rateTableUsed above — there's no ID to fall back to until
-    // that's been run once on a given location.
+    // pay-statements.js's own "Set up Pay Statements" button creates this
+    // fresh on a location's first run (ensureOpportunityField), same
+    // no-fallback-ID situation as serviceType/rateTableUsed above --
+    // there's no ID to fall back to until that's been run once.
     assignedDriver: [],
   };
 
@@ -275,12 +254,12 @@
     // field; it just needs a Business Account record named exactly "AAA"
     // and one named exactly "Private" to match this field's two values.
     dispatchSource: ["dispatch source"],
-    // The 2 fields "Set up rate engine" (8. Rates & Services) creates on
+    // The 2 fields "Set up rate engine" (7. Rates & Services) creates on
     // the Opportunity the first time it's run on a given location.
     serviceType: ["service type"],
     rateTableUsed: ["rate table used"],
-    // The field "9. Driver Pay Statements" below creates on the
-    // Opportunity the first time "Set up Pay Statements" is run on a given
+    // The field pay-statements.js's own "Set up Pay Statements" button
+    // creates on the Opportunity the first time it's run on a given
     // location. Plain text, matched by exact name against Drivers →
     // Profiles' own driver_name — same by-name idiom as Business Account's
     // Default Rate Table, not a picklist, so it never needs to be kept in
@@ -574,7 +553,7 @@
   // key 404s, leaves it alone if it already exists. UNVERIFIED — see this
   // section's top-of-block comment.
   function ensureObjectSchema(shortKey, labels) {
-    return ghlApi("/objects/" + objectSchemaKey(shortKey), { version: CONFIG.apiVersions.objects })
+    return ghlApi("/objects/" + objectSchemaKey(shortKey) + "?locationId=" + CONFIG.locationId, { version: CONFIG.apiVersions.objects })
       .then(function () { return { created: false }; })
       .catch(function (err) {
         // Only a 404 ("doesn't exist yet") should fall through to create —
@@ -598,22 +577,69 @@
       });
   }
 
+  // Field folders are required by the real create-field endpoint below
+  // (parentId) but aren't anything this file otherwise cares about --
+  // fetched/created once per object key and cached for the rest of this
+  // page load, so provisioning a dozen fields on the same object only
+  // touches the folder endpoint once.
+  var fieldFolderCache = {};
+  function getOrCreateFieldFolder(objectKey, folderName) {
+    var cacheKey = objectKey + "::" + folderName;
+    if (fieldFolderCache[cacheKey]) return fieldFolderCache[cacheKey];
+    var p = ghlApi("/custom-fields/object-key/" + objectKey + "?locationId=" + CONFIG.locationId, { version: CONFIG.apiVersions.objects })
+      .then(function (res) {
+        var folders = (res && res.folders) || [];
+        var existing = folders.filter(function (f) { return String(f.name || "").trim().toLowerCase() === folderName.trim().toLowerCase(); })[0];
+        if (existing) return existing.id;
+        return ghlApi("/custom-fields/folder", {
+          method: "POST",
+          version: CONFIG.apiVersions.objects,
+          body: { locationId: CONFIG.locationId, name: folderName, objectKey: objectKey },
+        }).then(function (res2) { return res2.folder.id; });
+      });
+    fieldFolderCache[cacheKey] = p;
+    return p;
+  }
+
+  // "per_mile" -> "Per Mile" -- used as a SINGLE_OPTIONS option's display
+  // label when fieldDef doesn't supply one explicitly via optionLabels.
+  function keyToLabel(key) {
+    return String(key).split("_").map(function (w) {
+      return w ? w.charAt(0).toUpperCase() + w.slice(1) : w;
+    }).join(" ");
+  }
+
   // Adds one field to a Custom Object schema if a field with this name
   // doesn't already exist on it. dataType is one of GHL's custom-object
   // field types: TEXT | LARGE_TEXT | NUMERICAL | MONETORY | CHECKBOX |
-  // SINGLE_OPTIONS | DATE. UNVERIFIED — see this section's top-of-block
-  // comment.
-  function ensureObjectField(shortKey, fieldDef) {
-    return ghlApi("/objects/" + objectSchemaKey(shortKey) + "/fields", { version: CONFIG.apiVersions.objects })
+  // SINGLE_OPTIONS | DATE. CONFIRMED live 2026-11-23 -- see this
+  // function's own top comment for the real endpoint/shape this replaced.
+  function ensureObjectField(shortKey, fieldDef, folderName) {
+    var objectKey = objectSchemaKey(shortKey);
+    return ghlApi("/custom-fields/object-key/" + objectKey + "?locationId=" + CONFIG.locationId, { version: CONFIG.apiVersions.objects })
       .then(function (res) {
-        var existing = (res && (res.fields || res)) || [];
+        var existing = (res && res.fields) || [];
         var already = existing.some(function (f) { return String(f.name || "").trim().toLowerCase() === fieldDef.name.trim().toLowerCase(); });
         if (already) return { created: false };
-        return ghlApi("/objects/" + objectSchemaKey(shortKey) + "/fields", {
-          method: "POST",
-          version: CONFIG.apiVersions.objects,
-          body: Object.assign({ locationId: CONFIG.locationId }, fieldDef),
-        }).then(function () { return { created: true }; });
+        return getOrCreateFieldFolder(objectKey, folderName || "Details").then(function (parentId) {
+          var snakeKey = fieldDef.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+          var body = {
+            locationId: CONFIG.locationId,
+            name: fieldDef.name,
+            showInForms: true,
+            dataType: fieldDef.dataType,
+            fieldKey: objectKey + "." + snakeKey,
+            objectKey: objectKey,
+            parentId: parentId,
+          };
+          if (fieldDef.picklistOptions && fieldDef.picklistOptions.length) {
+            body.options = fieldDef.picklistOptions.map(function (key) {
+              return { key: key, label: (fieldDef.optionLabels && fieldDef.optionLabels[key]) || keyToLabel(key) };
+            });
+          }
+          return ghlApi("/custom-fields/", { method: "POST", version: CONFIG.apiVersions.objects, body: body })
+            .then(function () { return { created: true }; });
+        });
       });
   }
 
@@ -731,329 +757,6 @@
           });
         });
       });
-  }
-
-  // ---------------------------------------------------------------------
-  // 9. Driver Pay Statements (2026-11-03) — auto-computes a driver's
-  // commission straight from their own won Opportunities (job value x the
-  // Commission % already on their driver profile) over a date range,
-  // instead of hand-typing a number into the existing Driver Quarter
-  // object every quarter. Same job-value x commission-rate math, and the
-  // same "snapshot it so a later edit can't retroactively change a
-  // statement someone already generated" principle, as HookOps' own Pay
-  // Statement generator (app/routes/finance.py) — ported here as a
-  // judgment call about what "the same feature" should mean on this
-  // codebase's own terms, not a line-by-line port of that code.
-  //
-  // Storage is one new flat Custom Object, "pay_statements" — one record
-  // per generated statement, its line items serialized into a Line Items
-  // JSON field rather than a second linked object. There's no real
-  // parent/child relation exposed by this REST API (every "relation" in
-  // this file — Business Account -> Rate Table, Quarter -> Driver — is
-  // just a text field matched by name), and a second object only to hold
-  // a handful of rows per statement would add real surface for no benefit
-  // at this scale.
-  //
-  // Needs one new Opportunity field, created the first time "Set up Pay
-  // Statements" is clicked: "Assigned Driver" (plain TEXT, matched by
-  // exact name against Drivers -> Profiles' own driver name — same idiom
-  // as Business Account's Default Rate Table, and it sidesteps keeping a
-  // SINGLE_OPTIONS picklist in sync with the driver roster). PLAINLY:
-  // nothing in this codebase writes that field automatically. A
-  // dispatcher has to type the driver's name onto each won Opportunity by
-  // hand — typically while closing out the job — before that job will
-  // ever show up in a pay statement for them. The driver picker below
-  // only ever shows names already on file in Drivers -> Profiles, so a
-  // generated statement can't be typo'd onto the wrong driver from this
-  // side, but a typo on the Opportunity's own Assigned Driver field is a
-  // real failure mode this file can't catch — it just shows up as "0 jobs
-  // matched" in the preview, which is why that empty-state message below
-  // says to check the spelling.
-  //
-  // UNVERIFIED, same caveat as the rate engine above and this file's own
-  // top-of-file header: ensureOpportunityField's call for the new
-  // Assigned Driver field, and ensureObjectSchema/ensureObjectField's
-  // calls for the new pay_statements object, have never been run against
-  // a real token in this session. Click "Set up Pay Statements" once and
-  // read what it reports (created vs. already existed) before relying on
-  // this in front of a client — it's idempotent, same as "Set up rate
-  // engine," so re-clicking after a failure is safe.
-  // ---------------------------------------------------------------------
-
-  function ensurePayStatementsSetup(onStep) {
-    function step(label, fn) {
-      if (onStep) onStep(label);
-      return fn();
-    }
-    return step("Pay Statements object", function () {
-      return ensureObjectSchema(CONFIG.objectKeys.payStatements, { singular: "Pay Statement", plural: "Pay Statements" });
-    })
-      .then(function () {
-        return Promise.all([
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Driver Name", dataType: "TEXT" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Period Start", dataType: "DATE" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Period End", dataType: "DATE" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Status", dataType: "TEXT" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Job Count", dataType: "NUMERICAL" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Gross Job Value", dataType: "MONETORY" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Commission Pct Used", dataType: "NUMERICAL" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Commission Total", dataType: "MONETORY" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Adjustment Amount", dataType: "MONETORY" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Adjustment Note", dataType: "TEXT" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Total", dataType: "MONETORY" }),
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Generated At", dataType: "DATE" }),
-          // One job per line, serialized — see this block's own top
-          // comment for why this isn't a second linked Custom Object.
-          ensureObjectField(CONFIG.objectKeys.payStatements, { name: "Line Items JSON", dataType: "LARGE_TEXT" }),
-        ]);
-      })
-      .then(function () {
-        return step("Opportunity field (Assigned Driver)", function () {
-          return ensureOpportunityField({ name: "Assigned Driver", dataType: "TEXT" });
-        });
-      });
-  }
-
-  // ---------------------------------------------------------------------
-  // 10. Driver Onboarding Setup (2026-11-23) -- adds the rest of the
-  // fields driver-onboarding.js's fill-out form reads/writes on the
-  // existing Drivers object (custom_objects.driver_profiles). Does NOT
-  // touch the one field already on that object (the driver's own name) --
-  // ensureObjectField() only matches on exact field NAME, and this file
-  // has no reliable way to know whether that field is named "Driver Name",
-  // "Driver's Name", or something else without reading it live, so
-  // creating a field here under a guessed name risks a confusing
-  // duplicate sitting next to the real one instead of matching it.
-  // driver-onboarding.js itself resolves that field (and every field
-  // below) BY NAME at load time -- same by-name idiom resolveFieldIds()
-  // already uses for Opportunity custom fields elsewhere in this file --
-  // so it works whatever that first field actually ends up named.
-  //
-  // Each SINGLE_OPTIONS field's picklistOptions below are the exact
-  // option KEYS driver-onboarding.js writes and dashboard.js's
-  // DRIVER_OPTION_LABELS already expects (GHL stores/returns the key, not
-  // the label -- see dashboard.js's own CONFIRMED note on this). "Hourly
-  // Rate" is new here -- the existing Pay Type field only ever had
-  // Commission wired up on the Pay Statements side (see "9. Driver Pay
-  // Statements" above, which computes job value x Commission % and has
-  // no equivalent math for an hourly driver yet); this just gives an
-  // hourly driver somewhere to have their rate stored for when that gets
-  // built.
-  //
-  // UNVERIFIED, same caveat as every other ensureObjectField call in this
-  // file: never run against a real token in this session. Idempotent --
-  // safe to click more than once.
-  // ---------------------------------------------------------------------
-  function ensureDriverOnboardingSetup(onStep) {
-    function step(label, fn) {
-      if (onStep) onStep(label);
-      return fn();
-    }
-    return step("Driver profile fields", function () {
-      return Promise.all([
-        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Email", dataType: "TEXT" }),
-        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Phone", dataType: "TEXT" }),
-        ensureObjectField(CONFIG.objectKeys.drivers, {
-          name: "Onboarding Status", dataType: "SINGLE_OPTIONS",
-          picklistOptions: ["onboarding", "active", "suspended"],
-        }),
-        ensureObjectField(CONFIG.objectKeys.drivers, {
-          name: "Employment Type", dataType: "SINGLE_OPTIONS",
-          picklistOptions: ["full_time", "part_time", "weekend"],
-        }),
-        ensureObjectField(CONFIG.objectKeys.drivers, {
-          name: "Pay Type", dataType: "SINGLE_OPTIONS",
-          picklistOptions: ["commission", "hourly"],
-        }),
-        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Commission Pct", dataType: "NUMERICAL" }),
-        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Hourly Rate", dataType: "MONETORY" }),
-        ensureObjectField(CONFIG.objectKeys.drivers, {
-          name: "License Status", dataType: "SINGLE_OPTIONS",
-          picklistOptions: ["on_file", "missing", "expired"],
-        }),
-        ensureObjectField(CONFIG.objectKeys.drivers, {
-          name: "Insurance Status", dataType: "SINGLE_OPTIONS",
-          picklistOptions: ["on_file", "missing", "expired"],
-        }),
-        ensureObjectField(CONFIG.objectKeys.drivers, {
-          name: "MVR Status", dataType: "SINGLE_OPTIONS",
-          picklistOptions: ["on_file", "missing", "expired"],
-        }),
-        ensureObjectField(CONFIG.objectKeys.drivers, {
-          name: "Certification Status", dataType: "SINGLE_OPTIONS",
-          picklistOptions: ["on_file", "missing", "expired"],
-        }),
-        ensureObjectField(CONFIG.objectKeys.drivers, {
-          name: "Training Status", dataType: "SINGLE_OPTIONS",
-          picklistOptions: ["not_started", "in_progress", "complete"],
-        }),
-      ]);
-    });
-  }
-
-  // Driver roster for the picker below, plus each driver's Commission %
-  // and Pay Type — the same driver_profiles object dashboard.js's Drivers
-  // -> Profiles tab already reads, just read here directly via
-  // listObjectRecords rather than importing dashboard.js's mapDriver
-  // (same no-shared-module reason as everything else duplicated between
-  // these two files).
-  function loadDriverRosterForPayStatements() {
-    return listObjectRecords(CONFIG.objectKeys.drivers).then(function (recs) {
-      return recs
-        .map(function (r) {
-          var p = r.properties || {};
-          return {
-            recordId: r.id,
-            name: p.driver_name || "",
-            payType: p.pay_type || "commission",
-            commissionPct: parseFloat(p.commission_pct),
-          };
-        })
-        .filter(function (d) { return d.name; });
-    });
-  }
-
-  // Every Opportunity ID already included in ANY existing Pay Statement
-  // for this driver, regardless of that statement's own period — so
-  // generating a second statement whose date range overlaps (or even just
-  // re-running the same range by mistake) can never double-pay a job a
-  // previous statement already covered. Nothing in GHL enforces this on
-  // its own; it's the same "exclude jobs already on a statement" rule
-  // HookOps' own generator enforces at the database level (NOT IN ... in
-  // app/routes/finance.py), ported here as a client-side check against
-  // every existing record instead.
-  function alreadyPaidOpportunityIds(driverName) {
-    return listObjectRecords(CONFIG.objectKeys.payStatements).then(function (recs) {
-      var ids = {};
-      recs.forEach(function (r) {
-        var p = r.properties || {};
-        if (String(p.driver_name || "").trim().toLowerCase() !== driverName.trim().toLowerCase()) return;
-        var items = [];
-        try { items = JSON.parse(p.line_items_json || "[]"); } catch (e) { items = []; }
-        items.forEach(function (it) { if (it && it.opportunityId) ids[it.opportunityId] = true; });
-      });
-      return ids;
-    });
-  }
-
-  // Scans the dispatch pipeline for this driver's won jobs in the given
-  // period. Filters cheaply first — status and updatedAt are already on
-  // the lightweight /opportunities/search rows loadAllOpportunities()
-  // returns, no extra calls — and only does a per-Opportunity GET (via
-  // mapWithConcurrency, the same primitive buildWoMap() and
-  // findDuplicateWorkOrders() above already use) on the subset that
-  // survives that filter, since Assigned Driver needs the full/reliable
-  // read (see getCustomField's own comment on why /opportunities/search's
-  // customFields payload isn't trustworthy). Deliberately cheaper than
-  // findDuplicateWorkOrders()'s brute-force full-pipeline GET, since this
-  // only needs to look at jobs that already match on status + date.
-  function scanOpportunitiesForDriverPay(driverName, periodStart, periodEnd, onProgress) {
-    var startMs = new Date(periodStart + "T00:00:00").getTime();
-    var endMs = new Date(periodEnd + "T23:59:59.999").getTime();
-    return resolveFieldIds()
-      .then(function () { return loadPipelines(); })
-      .then(function (pipelines) {
-        var pipeline = pipelines.filter(function (p) {
-          return (p.name || "").toLowerCase() === CONFIG.dispatchPipelineName.toLowerCase();
-        })[0];
-        if (!pipeline) throw new Error('No pipeline named "' + CONFIG.dispatchPipelineName + '" found in this GHL location.');
-        return loadAllOpportunities(pipeline.id).then(function (list) {
-          var candidates = list.filter(function (o) {
-            if (o.status !== "won") return false;
-            var ts = new Date(o.updatedAt || o.dateUpdated || "").getTime();
-            return !isNaN(ts) && ts >= startMs && ts <= endMs;
-          });
-          var assignedFieldIds = fieldIdsFor("assignedDriver");
-          return mapWithConcurrency(candidates, 4, function (o) { return getOpportunity(o.id); }, onProgress).then(function (fullOpps) {
-            var matched = [];
-            fullOpps.forEach(function (full) {
-              if (!full) return;
-              var assigned = getCustomField(full, assignedFieldIds);
-              if (String(assigned || "").trim().toLowerCase() !== driverName.trim().toLowerCase()) return;
-              matched.push({
-                opportunityId: full.id,
-                name: full.name,
-                updatedAt: full.updatedAt || full.dateUpdated || null,
-                jobValue: full.monetaryValue != null ? full.monetaryValue : 0,
-              });
-            });
-            return { pipelineName: pipeline.name, scanned: candidates.length, matched: matched };
-          });
-        });
-      });
-  }
-
-  // Combines the scan above with the driver's Commission % and the
-  // already-paid exclusion into the exact shape the preview/apply UI
-  // needs. Pure composition — no network calls beyond the two the two
-  // functions above already make.
-  function buildPayStatementPreview(driver, periodStart, periodEnd, onProgress) {
-    return Promise.all([
-      scanOpportunitiesForDriverPay(driver.name, periodStart, periodEnd, onProgress),
-      alreadyPaidOpportunityIds(driver.name),
-    ]).then(function (results) {
-      var scan = results[0];
-      var paidIds = results[1];
-      var pct = isNaN(driver.commissionPct) ? 0 : driver.commissionPct;
-      var included = [];
-      var excludedAlreadyPaid = 0;
-      scan.matched.forEach(function (job) {
-        if (paidIds[job.opportunityId]) {
-          excludedAlreadyPaid += 1;
-          return;
-        }
-        var commission = Math.round(job.jobValue * (pct / 100) * 100) / 100;
-        included.push({
-          opportunityId: job.opportunityId,
-          name: job.name,
-          updatedAt: job.updatedAt,
-          jobValue: job.jobValue,
-          commission: commission,
-        });
-      });
-      var grossJobValue = included.reduce(function (s, j) { return s + j.jobValue; }, 0);
-      var commissionTotal = included.reduce(function (s, j) { return s + j.commission; }, 0);
-      return {
-        driver: driver,
-        periodStart: periodStart,
-        periodEnd: periodEnd,
-        pipelineName: scan.pipelineName,
-        scanned: scan.scanned,
-        excludedAlreadyPaid: excludedAlreadyPaid,
-        jobs: included,
-        grossJobValue: Math.round(grossJobValue * 100) / 100,
-        commissionTotal: Math.round(commissionTotal * 100) / 100,
-      };
-    });
-  }
-
-  // Writes the statement — the only write this feature performs, gated
-  // behind the same "type APPLY to confirm" control section 5's AAA import
-  // uses. commission_pct_used snapshots the rate actually applied (not a
-  // live pointer to the driver's current Commission %), so a later change
-  // to that driver's profile can never retroactively change what this
-  // statement says they were paid for this period — same reasoning as
-  // Rate Table Used being stamped once on a job and never recomputed.
-  function applyPayStatement(preview, adjustmentAmount, adjustmentNote) {
-    var adj = adjustmentAmount || 0;
-    var total = Math.round((preview.commissionTotal + adj) * 100) / 100;
-    var today = new Date().toISOString().slice(0, 10);
-    return createObjectRecord(CONFIG.objectKeys.payStatements, {
-      name: preview.driver.name + " — " + preview.periodStart + " to " + preview.periodEnd,
-      driver_name: preview.driver.name,
-      period_start: preview.periodStart,
-      period_end: preview.periodEnd,
-      status: "final",
-      job_count: preview.jobs.length,
-      gross_job_value: preview.grossJobValue,
-      commission_pct_used: preview.driver.commissionPct,
-      commission_total: preview.commissionTotal,
-      adjustment_amount: adj,
-      adjustment_note: adjustmentNote || "",
-      total: total,
-      generated_at: today,
-      line_items_json: JSON.stringify(preview.jobs),
-    });
   }
 
   // GHL's REST API needs a custom object's schemaKey fully qualified as
@@ -1747,29 +1450,6 @@
     '#cjt-setup-root .cjtLockBtn:hover{background:var(--accent-strong)}',
     '#cjt-setup-root .cjtLockError{color:var(--crit);font-size:12px;margin-top:8px;min-height:14px}',
     '@media (prefers-reduced-motion:reduce){#cjt-setup-root *{animation-duration:.001s!important;transition-duration:.001s!important}}',
-    // extInstall* rules are unscoped (not under #cjt-setup-root) because the
-    // checklist overlay is appended straight to <body> — see
-    // openInstallSteps() — so it always covers the full viewport
-    // regardless of where #cjt-setup-root sits on the page. Class names are
-    // deliberately distinctive to keep collisions with the host GHL page's
-    // own CSS unlikely.
-    '.extInstallOverlay{position:fixed;inset:0;background:rgba(25,25,28,.6);display:flex;align-items:center;justify-content:center;z-index:999999;padding:16px;font-family:"Roboto",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
-    '.extInstallCard{position:relative;background:#fff;color:#19191c;border-radius:14px;padding:26px 26px 22px;max-width:420px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.28);max-height:82vh;overflow-y:auto}',
-    '.extInstallClose{position:absolute;top:14px;right:14px;border:none;background:none;font-size:20px;line-height:1;cursor:pointer;color:#6b7280;padding:4px}',
-    '.extInstallClose:hover{color:#19191c}',
-    '.extInstallTitle{font-size:17px;font-weight:700;margin-bottom:4px;padding-right:20px}',
-    '.extInstallSub{font-size:12.5px;color:#6b7280;line-height:1.5;margin-bottom:16px}',
-    '.extInstallSteps{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:12px}',
-    '.extInstallSteps li{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5}',
-    '.extInstallSteps .stepNum{flex:0 0 auto;width:20px;height:20px;border-radius:999px;background:#fff6de;color:#19191c;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:1px}',
-    '.extInstallSteps li.done .stepNum{background:#dcfce7;color:#15803d}',
-    '.extInstallSteps label.stepText{display:flex;gap:8px;align-items:flex-start;flex:1;min-width:0;cursor:pointer}',
-    '.extInstallSteps label.stepText input[type="checkbox"]{flex:0 0 auto;width:15px;height:15px;margin-top:2px;accent-color:#19191c;cursor:pointer}',
-    '.extInstallSteps .stepTxt b{font-weight:700}',
-    '.extInstallSteps li.done .stepTxt{color:#8a92a3;text-decoration:line-through}',
-    '.extInstallProgress{font-size:11.5px;color:#8a92a3;margin:0 0 14px}',
-    '.extInstallReset{background:none;border:none;padding:0;font-size:12px;color:#19191c;cursor:pointer;text-decoration:underline}',
-    '.extInstallSteps .mono{font-family:"Roboto",ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef1f5;padding:1px 5px;border-radius:4px;font-size:12px}'
   ].join("\n");
 
   var PAGE_HTML =
@@ -1830,12 +1510,7 @@
     '<div id="dupeResultsWrap"></div>' +
     '</div>' +
 
-    '<div class="card" id="cardExtension"><h2>7. AAA Work Order Extractor (browser extension)</h2>' +
-    '<div class="cardDesc">The dispatcher-side companion tool: it reads an AAA work order page and can sync it straight into this pipeline. No GHL token or setup ever lives on the dispatcher\'s computer — the extension just talks to a shared cloud bridge. Install is one download, no installer to run: unzip it and load it in Chrome.</div>' +
-    '<div id="extDownloadWrap"></div>' +
-    '</div>' +
-
-    '<div class="card" id="cardRates"><h2>8. Rates &amp; Services</h2>' +
+    '<div class="card" id="cardRates"><h2>7. Rates &amp; Services</h2>' +
     '<div class="cardDesc">What a job costs, in one place instead of scattered across GHL screens: a catalog of services (what kind of job), rate tables (base fee, per-mile rate, minimum, flatbed surcharge — a job keeps whatever table was current when it was created, so changing a rate here never touches a past job), and business accounts (AAA vs. Private today — each can default to its own rate table).</div>' +
     '<div class="btnRow"><button type="button" class="btn primary" id="btnSetupRateEngine">Set up rate engine</button><button type="button" class="btn" id="btnLoadRates">Reload</button></div>' +
     '<div class="statusMsg" id="rateSetupStatus"></div>' +
@@ -1892,37 +1567,7 @@
     '</div>' +
     '</div>' +
 
-    '<div class="card" id="cardPayStatements"><h2>9. Driver Pay Statements</h2>' +
-    '<div class="cardDesc">Auto-computes a driver\'s commission from their own won Opportunities — job value &times; their Commission % (set on the driver\'s profile in Drivers &rarr; Profiles) — over a date range. <b>Needs every won Opportunity tagged with the new "Assigned Driver" field first</b> — type the driver\'s name onto the job exactly as it appears in Drivers &rarr; Profiles; nothing here writes that automatically. Nothing is written to GHL until you review the preview and type APPLY, and a job already paid on an earlier statement for this driver is excluded automatically.</div>' +
-    '<div class="btnRow"><button type="button" class="btn primary" id="btnSetupPayStatements">Set up Pay Statements</button></div>' +
-    '<div class="statusMsg" id="paySetupStatus"></div>' +
-
-    '<div style="margin-top:20px;">' +
-    '<div class="fieldRow">' +
-    '<div class="field"><label for="fPayDriver">Driver</label><select id="fPayDriver"><option value="">Click “Load drivers” &rarr;</option></select></div>' +
-    '<div class="field"><label>&nbsp;</label><button type="button" class="btn" id="btnPayLoadDrivers" style="width:100%;">Load drivers</button></div>' +
-    '</div>' +
-    '<div class="fieldRow">' +
-    '<div class="field"><label for="fPayStart">Period start</label><input type="date" id="fPayStart"></div>' +
-    '<div class="field"><label for="fPayEnd">Period end</label><input type="date" id="fPayEnd"></div>' +
-    '</div>' +
-    '<div class="btnRow"><button type="button" class="btn primary" id="btnPayPreview">Preview</button></div>' +
-    '<div class="progressWrap" id="payProgress"><div class="progressBar"><div id="payProgressBar"></div></div><div class="progressLabel" id="payProgressLabel"></div></div>' +
-    '<div class="statusMsg" id="payStatus"></div>' +
-    '<div id="paySummary"></div>' +
-    '<div id="payTableWrap"></div>' +
-    '<div id="payAdjustWrap"></div>' +
-    '<div id="payApplyWrap"></div>' +
-    '</div>' +
-    '</div>' +
-
-    '<div class="card" id="cardDriverOnboarding"><h2>10. Driver Onboarding Setup</h2>' +
-    '<div class="cardDesc">Adds the rest of the fields the Driver Onboarding form needs to the existing Drivers object (Email, Phone, Onboarding Status, Employment Type, Pay Type, Commission %, Hourly Rate, and the License/Insurance/MVR/Certification/Training status fields). <b>One thing this can\'t do:</b> create the "Driver Onboarding" Pipeline itself — go create that by hand first, in Settings &rarr; Pipelines, with these exact stages in order: <b>Applied, Documents Submitted, Background Check, Approved, Active</b> (plus a separate <b>Rejected</b> stage) — then paste driver-onboarding.js\'s own snippet on its page per that file\'s own top-of-file comment.</div>' +
-    '<div class="btnRow"><button type="button" class="btn primary" id="btnSetupDriverOnboarding">Set up driver fields</button></div>' +
-    '<div class="statusMsg" id="driverSetupStatus"></div>' +
-    '</div>' +
-
-    '<div class="foot-note" id="footNote">Field IDs for AAA reconciliation on the Opportunity are specific to this GHL location — see the note at the top of setup.js before reusing this for a different client.</div>' +
+    '<div class="foot-note" id="footNote">Field IDs for AAA reconciliation on the Opportunity are specific to this GHL location — see the note at the top of setup.js before reusing this for a different client. Drivers, Pay Statements, the browser extension, and Trucks &amp; Maintenance each now live on their own standalone page (driver-onboarding.js, pay-statements.js, extension-download.js) — this page is admin/billing config only.</div>' +
     "</div>";
 
   function sha256HexUi(str) { return sha256Hex(str); }
@@ -2054,15 +1699,10 @@
      "fFile", "togglePaste", "pasteWrap", "fPaste", "btnPreview",
      "importProgress", "importProgressBar", "importProgressLabel", "importStatus", "importSummary", "importTableWrap", "applyWrap",
      "btnScanDupes", "dupeProgress", "dupeProgressBar", "dupeProgressLabel", "dupeStatus", "dupeResultsWrap",
-     "extDownloadWrap",
      "btnSetupRateEngine", "btnLoadRates", "rateSetupStatus",
      "servicesTableWrap", "fSvcName", "fSvcCategory", "fSvcUnit", "fSvcPrice", "btnSaveService", "btnCancelSvcEdit", "svcStatus",
      "ratesTableWrap", "fRtName", "fRtRounding", "fRtBase", "fRtPerMile", "fRtIncluded", "fRtMin", "fRtAfterHours", "fRtFlatbed", "fRtIsCurrent", "btnSaveRateTable", "btnCancelRtEdit", "rtStatus",
-     "acctsTableWrap", "fAcctName", "fAcctType", "fAcctRateTable", "btnSaveAcct", "btnCancelAcctEdit", "acctStatus",
-     "btnSetupPayStatements", "paySetupStatus",
-     "fPayDriver", "btnPayLoadDrivers", "fPayStart", "fPayEnd", "btnPayPreview",
-     "payProgress", "payProgressBar", "payProgressLabel", "payStatus", "paySummary", "payTableWrap", "payAdjustWrap", "payApplyWrap",
-     "btnSetupDriverOnboarding", "driverSetupStatus"
+     "acctsTableWrap", "fAcctName", "fAcctType", "fAcctRateTable", "btnSaveAcct", "btnCancelAcctEdit", "acctStatus"
     ].forEach(function (id) { els[id] = root.querySelector("#" + id); });
 
     // ---- Prefill from CONFIG (whatever was pasted in window.CJT_CONFIG) ----
@@ -2416,160 +2056,8 @@
         .finally(function () { els.btnScanDupes.disabled = false; });
     });
 
-    // ---- 7. Extension download (GitHub Releases) ----
-    // A webpage can never install or run software on a visitor's computer
-    // by itself — this only gets them the zip with one click. The actual
-    // install (unzip + Load unpacked in the browser) still happens
-    // locally, once, on each computer that needs the extension — but as of
-    // 2026-10-15 that's the whole install: no installer script, no OS
-    // detection needed (one zip, same steps on Mac/Windows/Linux), no GHL
-    // token touches this computer at all. The URL below is GitHub's stable
-    // "always the newest Release" link — publishing a new GitHub Release
-    // with the same asset filename is the only thing that has to happen to
-    // ship an update; this link never changes. Unlike this URL,
-    // dashboard.js/setup.js are loaded via jsDelivr's "@main" (not
-    // "@latest" — see the top-of-file comment), since those files should
-    // always track the newest commit, not a Release tag; the two
-    // mechanisms are intentionally different because Releases here version
-    // the extension zip, not this dashboard code.
-    function releaseAssetUrl(repo, asset) {
-      return "https://github.com/" + repo + "/releases/latest/download/" + encodeURIComponent(asset);
-    }
 
-    // installSteps/openInstallSteps: the on-page checklist that pops up the
-    // instant someone clicks the download button, so the guidance reads as
-    // part of that click even though the file-save itself is the browser's
-    // own UI. The overlay is appended to <body>, not #cjt-setup-root, so it
-    // always covers the full viewport.
-    function installSteps() {
-      return [
-        "Your download has started in the browser (its own download bar/notification, not this page) — wait for it to finish.",
-        'Unzip <span class="mono">AAA-GHL-Extractor.zip</span> (double-click it on Mac; right-click → <b>Extract All…</b> on Windows) — you\'ll get a folder called <span class="mono">aaa-browser-extension</span>. Put it somewhere permanent (not the Downloads folder, so it doesn\'t get cleaned up later).',
-        'In Chrome, go to <span class="mono">chrome://extensions</span> (Edge, Brave, and Vivaldi all work the same way — just use that browser\'s own <span class="mono">://extensions</span> page instead).',
-        'Turn on <b>Developer mode</b> (top-right toggle).',
-        'Click <b>Load unpacked</b> and select the <span class="mono">aaa-browser-extension</span> folder you unzipped.',
-        "That's it — no installer, no GHL token to enter, nothing else to configure. Open an AAA Work Order page and click the extension icon to try it."
-      ];
-    }
-    // Checklist progress persists per-computer (localStorage), so closing
-    // the popup — or leaving the page and coming back later to finish
-    // install — doesn't lose which steps were already done. This is a
-    // per-browser convenience only: it never leaves this machine and
-    // nothing here is synced anywhere.
-    var INSTALL_PROGRESS_KEY = "cjtExtInstallProgress";
-    function loadProgress() {
-      try {
-        var raw = window.localStorage.getItem(INSTALL_PROGRESS_KEY);
-        var arr = raw ? JSON.parse(raw) : [];
-        return Array.isArray(arr) ? arr : [];
-      } catch (e) { return []; }
-    }
-    function saveProgress(idxArr) {
-      try { window.localStorage.setItem(INSTALL_PROGRESS_KEY, JSON.stringify(idxArr)); } catch (e) { /* private/blocked storage — checklist still works, just won't persist */ }
-    }
-    function openInstallSteps() {
-      var steps = installSteps();
-      var checkedIdx = {};
-      loadProgress().forEach(function (i) { checkedIdx[i] = true; });
-
-      var overlay = document.createElement("div");
-      overlay.className = "extInstallOverlay";
-      var stepsHtml = steps
-        .map(function (s, i) {
-          var isDone = !!checkedIdx[i];
-          return (
-            '<li class="' + (isDone ? "done" : "") + '">' +
-            '<span class="stepNum">' + (i + 1) + "</span>" +
-            '<label class="stepText">' +
-            '<input type="checkbox" data-idx="' + i + '"' + (isDone ? " checked" : "") + ">" +
-            '<span class="stepTxt">' + s + "</span>" +
-            "</label>" +
-            "</li>"
-          );
-        })
-        .join("");
-      overlay.innerHTML =
-        '<div class="extInstallCard">' +
-        '<button type="button" class="extInstallClose" aria-label="Close">&times;</button>' +
-        '<div class="extInstallTitle">Installing the extension</div>' +
-        '<div class="extInstallSub">Follow these steps once the download above finishes. Check each one off as you go — your progress is saved on this computer, so it’s still here if you close this and come back.</div>' +
-        '<ol class="extInstallSteps">' + stepsHtml + "</ol>" +
-        '<div class="extInstallProgress"><span class="extInstallProgressText"></span> · <button type="button" class="extInstallReset">Reset checklist</button></div>' +
-        '<div class="btnRow"><button type="button" class="btn primary extInstallDone">Close</button></div>' +
-        "</div>";
-      document.body.appendChild(overlay);
-
-      var progressText = overlay.querySelector(".extInstallProgressText");
-      function refreshProgressText() {
-        var done = overlay.querySelectorAll(".extInstallSteps input[type=checkbox]:checked").length;
-        progressText.textContent = done + " of " + steps.length + " done";
-      }
-      refreshProgressText();
-
-      function persist() {
-        var idxs = [];
-        Array.prototype.forEach.call(overlay.querySelectorAll(".extInstallSteps input[type=checkbox]:checked"), function (cb) {
-          idxs.push(Number(cb.getAttribute("data-idx")));
-        });
-        saveProgress(idxs);
-      }
-
-      Array.prototype.forEach.call(overlay.querySelectorAll(".extInstallSteps input[type=checkbox]"), function (cb) {
-        cb.addEventListener("change", function () {
-          var li = cb.closest("li");
-          if (li) li.classList.toggle("done", cb.checked);
-          refreshProgressText();
-          persist();
-        });
-      });
-
-      overlay.querySelector(".extInstallReset").addEventListener("click", function () {
-        Array.prototype.forEach.call(overlay.querySelectorAll(".extInstallSteps input[type=checkbox]"), function (cb) {
-          cb.checked = false;
-          var li = cb.closest("li");
-          if (li) li.classList.remove("done");
-        });
-        refreshProgressText();
-        saveProgress([]);
-      });
-
-      function close() {
-        overlay.remove();
-        document.removeEventListener("keydown", onKey);
-      }
-      function onKey(e) { if (e.key === "Escape") close(); }
-      overlay.querySelector(".extInstallClose").addEventListener("click", close);
-      overlay.querySelector(".extInstallDone").addEventListener("click", close);
-      // Deliberately no "click outside the card to close" — someone mid-way
-      // through checking off steps shouldn't be able to lose the popup with
-      // one stray click. Explicit X, Close button, or Escape only.
-      document.addEventListener("keydown", onKey);
-    }
-
-    function renderExtensionDownload() {
-      var repo = (CONFIG.extensionRepo || "").trim();
-      var asset = (CONFIG.extensionAsset || "").trim();
-      if (!repo) {
-        els.extDownloadWrap.innerHTML = '<div class="hint">Set <span class="mono">extensionRepo</span> in CJT_CONFIG (e.g. "your-org/cjt-ops-dashboard") to show the download button here.</div>';
-        return;
-      }
-      var btn = asset
-        ? '<a class="btn primary" id="extDownloadBtn" href="' + esc(releaseAssetUrl(repo, asset)) + '" target="_blank" rel="noopener noreferrer" download>Download the extension</a>'
-        : '<button type="button" class="btn" disabled>Download the extension (not published yet)</button>';
-      els.extDownloadWrap.innerHTML =
-        '<div class="btnRow">' + btn + "</div>" +
-        '<div class="hint" style="margin-top:10px;">Same download for Mac, Windows, and Linux — works in Chrome, Edge, Brave, or Vivaldi. ' +
-        "Click to start the download — a step-by-step install checklist pops up here right away to walk you through the rest (it's just unzip and load it in the browser, no installer). This button only starts the download; the checklist covers the rest." +
-        "</div>";
-      // Don't preventDefault on click — the browser's own download must
-      // still fire normally. This only opens the on-page checklist for
-      // what to do once that download lands.
-      var a = els.extDownloadWrap.querySelector("#extDownloadBtn");
-      if (a) a.addEventListener("click", function () { openInstallSteps(); });
-    }
-    renderExtensionDownload();
-
-    // ---- 8. Rates & Services -------------------------------------------
+    // ---- 7. Rates & Services -------------------------------------------
     var rateEngineData = { services: [], rateTables: [], accounts: [] };
     var editingSvcId = null, editingRtId = null, editingAcctId = null;
 
@@ -2796,180 +2284,6 @@
       }).catch(function (err) {
         showStatus(els.acctStatus, "err", "Couldn't save: " + err.message);
       }).finally(function () { els.btnSaveAcct.disabled = false; });
-    });
-
-    // ---- 9. Driver Pay Statements ---------------------------------------
-    var payDrivers = [];
-    var lastPayPreview = null;
-
-    function requirePayConn() {
-      if (!CONFIG.locationId || !CONFIG.privateToken) {
-        showStatus(els.paySetupStatus, "err", "Fill in Location ID and Private Integration Token above first (section 1), then come back here.");
-        return false;
-      }
-      return true;
-    }
-
-    els.btnSetupPayStatements.addEventListener("click", function () {
-      if (!requirePayConn()) return;
-      Object.assign(CONFIG, liveConfigFromForm());
-      els.btnSetupPayStatements.disabled = true;
-      showStatus(els.paySetupStatus, "info", "Starting…");
-      ensurePayStatementsSetup(function (label) { showStatus(els.paySetupStatus, "info", label + "…"); })
-        .then(function () {
-          showStatus(els.paySetupStatus, "ok", "Pay Statements is set up. Load drivers below and generate a statement.");
-        })
-        .catch(function (err) {
-          showStatus(els.paySetupStatus, "err", "Setup failed: " + err.message + " — safe to click “Set up Pay Statements” again, it skips anything already created.");
-        })
-        .finally(function () { els.btnSetupPayStatements.disabled = false; });
-    });
-
-    els.btnPayLoadDrivers.addEventListener("click", function () {
-      if (!requirePayConn()) return;
-      Object.assign(CONFIG, liveConfigFromForm());
-      els.btnPayLoadDrivers.disabled = true;
-      loadDriverRosterForPayStatements()
-        .then(function (drivers) {
-          payDrivers = drivers;
-          els.fPayDriver.innerHTML = drivers.length
-            ? drivers.map(function (d) {
-                var tag = d.payType !== "commission" ? " (" + esc(d.payType) + ")" : (isNaN(d.commissionPct) ? " (no %)" : " (" + d.commissionPct + "%)");
-                return '<option value="' + esc(d.name) + '">' + esc(d.name) + tag + "</option>";
-              }).join("")
-            : '<option value="">No drivers found — add one in Drivers first</option>';
-          showStatus(els.payStatus, "ok", "Loaded " + drivers.length + " driver(s).");
-        })
-        .catch(function (err) { showStatus(els.payStatus, "err", "Couldn't load drivers: " + err.message); })
-        .finally(function () { els.btnPayLoadDrivers.disabled = false; });
-    });
-
-    function setPayProgress(shown, done, total, label) {
-      els.payProgress.className = "progressWrap" + (shown ? " show" : "");
-      if (total) els.payProgressBar.style.width = Math.round((done / total) * 100) + "%";
-      els.payProgressLabel.textContent = label || (total ? done + " / " + total : "");
-    }
-
-    function renderPayPreview(preview) {
-      els.paySummary.innerHTML =
-        '<div class="summaryGrid">' +
-        '<div class="summaryTile matched"><div class="n">' + preview.jobs.length + '</div><div class="l">Jobs</div></div>' +
-        '<div class="summaryTile"><div class="n">' + money(preview.grossJobValue) + '</div><div class="l">Job value</div></div>' +
-        '<div class="summaryTile"><div class="n">' + money(preview.commissionTotal) + '</div><div class="l">Commission</div></div>' +
-        '<div class="summaryTile"><div class="n">' + preview.excludedAlreadyPaid + '</div><div class="l">Already paid</div></div>' +
-        "</div>";
-
-      if (preview.jobs.length === 0) {
-        els.payTableWrap.innerHTML = '<div class="hint">No won jobs found for ' + esc(preview.driver.name) + ' in this period with “Assigned Driver” set to this name — check the spelling on the Opportunity, and that “Assigned Driver” has actually been filled in.</div>';
-      } else {
-        els.payTableWrap.innerHTML =
-          '<div class="tableWrap"><table><thead><tr><th>Job</th><th>Closed</th><th>Job value</th><th>Commission</th></tr></thead><tbody>' +
-          preview.jobs.map(function (j) {
-            return "<tr><td>" + esc(j.name) + "</td><td>" + esc((j.updatedAt || "").slice(0, 10)) + "</td><td>" + money(j.jobValue) + "</td><td>" + money(j.commission) + "</td></tr>";
-          }).join("") + "</tbody></table></div>";
-      }
-
-      els.payAdjustWrap.innerHTML = preview.jobs.length === 0 ? "" :
-        '<div class="fieldRow" style="margin-top:12px;">' +
-        '<div class="field"><label for="fPayAdjustAmt">Adjustment ($, +/-)</label><input type="number" step="0.01" id="fPayAdjustAmt" value="0"></div>' +
-        '<div class="field"><label for="fPayAdjustNote">Adjustment note</label><input type="text" id="fPayAdjustNote" placeholder="e.g. fuel reimbursement"></div>' +
-        "</div>";
-
-      function currentTotal() {
-        var amtEl = els.payAdjustWrap.querySelector("#fPayAdjustAmt");
-        var adjAmt = amtEl ? parseFloat(amtEl.value) || 0 : 0;
-        return Math.round((preview.commissionTotal + adjAmt) * 100) / 100;
-      }
-
-      if (preview.jobs.length === 0) {
-        els.payApplyWrap.innerHTML = '<div class="hint">Nothing to apply — no jobs matched.</div>';
-        return;
-      }
-
-      els.payApplyWrap.innerHTML =
-        '<div class="statusMsg show info" id="payTotalMsg">Total to pay: ' + money(currentTotal()) + "</div>" +
-        '<div class="applyConfirm"><label for="payApplyConfirmInput" style="margin:0;font-size:12.5px;">Type APPLY to confirm writing this statement to GHL:</label>' +
-        '<input type="text" id="payApplyConfirmInput"></div>' +
-        '<div class="btnRow"><button type="button" class="btn danger" id="btnPayApply" disabled>Apply to GHL</button></div>';
-
-      var confirmInput = els.payApplyWrap.querySelector("#payApplyConfirmInput");
-      var applyBtn = els.payApplyWrap.querySelector("#btnPayApply");
-      confirmInput.addEventListener("input", function () {
-        applyBtn.disabled = confirmInput.value.trim().toUpperCase() !== "APPLY";
-      });
-      var amtEl = els.payAdjustWrap.querySelector("#fPayAdjustAmt");
-      if (amtEl) {
-        amtEl.addEventListener("input", function () {
-          var totalMsg = els.payApplyWrap.querySelector("#payTotalMsg");
-          if (totalMsg) totalMsg.textContent = "Total to pay: " + money(currentTotal());
-        });
-      }
-      applyBtn.addEventListener("click", function () {
-        applyBtn.disabled = true;
-        confirmInput.disabled = true;
-        var adjAmt = amtEl ? parseFloat(amtEl.value) || 0 : 0;
-        var noteEl = els.payAdjustWrap.querySelector("#fPayAdjustNote");
-        var adjNote = noteEl ? noteEl.value.trim() : "";
-        applyPayStatement(preview, adjAmt, adjNote)
-          .then(function () {
-            showStatus(els.payStatus, "ok", "Done. Pay statement for " + preview.driver.name + " written to GHL.");
-            els.payApplyWrap.innerHTML = "";
-          })
-          .catch(function (err) {
-            showStatus(els.payStatus, "err", "Apply failed: " + err.message);
-            applyBtn.disabled = false;
-            confirmInput.disabled = false;
-          });
-      });
-    }
-
-    els.btnPayPreview.addEventListener("click", function () {
-      if (!requirePayConn()) return;
-      Object.assign(CONFIG, liveConfigFromForm());
-      var driverName = els.fPayDriver.value;
-      var driver = payDrivers.filter(function (d) { return d.name === driverName; })[0];
-      var start = els.fPayStart.value;
-      var end = els.fPayEnd.value;
-      hideStatus(els.payStatus);
-      els.paySummary.innerHTML = "";
-      els.payTableWrap.innerHTML = "";
-      els.payAdjustWrap.innerHTML = "";
-      els.payApplyWrap.innerHTML = "";
-      if (!driver) { showStatus(els.payStatus, "err", "Click “Load drivers” and pick a driver first."); return; }
-      if (!start || !end) { showStatus(els.payStatus, "err", "Pick a period start and end date."); return; }
-      if (isNaN(driver.commissionPct)) { showStatus(els.payStatus, "err", driver.name + " has no Commission % set on their driver profile — set it there first."); return; }
-      els.btnPayPreview.disabled = true;
-      setPayProgress(true, 0, 1, "Scanning Opportunities…");
-      buildPayStatementPreview(driver, start, end, function (done, total) {
-        setPayProgress(true, done, total, "Scanning Opportunities… " + done + " / " + total);
-      })
-        .then(function (preview) {
-          lastPayPreview = preview;
-          setPayProgress(false, 0, 0, "");
-          showStatus(els.payStatus, "info", "Scanned " + preview.scanned + " won job(s) in “" + preview.pipelineName + "” closed in this period — " + preview.jobs.length + " assigned to " + driver.name + ". Nothing written yet — review below.");
-          renderPayPreview(preview);
-        })
-        .catch(function (err) {
-          setPayProgress(false, 0, 0, "");
-          showStatus(els.payStatus, "err", err.message);
-        })
-        .finally(function () { els.btnPayPreview.disabled = false; });
-    });
-
-    // ---- 10. Driver Onboarding Setup -------------------------------------
-    els.btnSetupDriverOnboarding.addEventListener("click", function () {
-      if (!requireConn()) return;
-      Object.assign(CONFIG, liveConfigFromForm());
-      els.btnSetupDriverOnboarding.disabled = true;
-      showStatus(els.driverSetupStatus, "info", "Starting…");
-      ensureDriverOnboardingSetup(function (label) { showStatus(els.driverSetupStatus, "info", label + "…"); })
-        .then(function () {
-          showStatus(els.driverSetupStatus, "ok", "Driver profile fields are set up. Don't forget the \"Driver Onboarding\" Pipeline itself still needs to be created by hand (see this card's note above) before new drivers will land anywhere.");
-        })
-        .catch(function (err) {
-          showStatus(els.driverSetupStatus, "err", "Setup failed: " + err.message + " — safe to click “Set up driver fields” again, it skips anything already created.");
-        })
-        .finally(function () { els.btnSetupDriverOnboarding.disabled = false; });
     });
 
     // Auto-load if a connection is already configured (e.g. this page was
