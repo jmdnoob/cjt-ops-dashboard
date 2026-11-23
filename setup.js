@@ -120,6 +120,17 @@
     locationId: "",
     privateToken: "",
     dispatchPipelineName: "Towing Dispatch",
+    // Driver Onboarding (2026-11-23) -- see "10. Driver Onboarding Setup"
+    // below. This Pipeline has to be created by hand in GHL Settings ->
+    // Pipelines (the Objects/Fields API this file otherwise uses to create
+    // things can't create a Pipeline or its stages) with these exact stage
+    // names, in this order: Applied, Documents Submitted, Background
+    // Check, Approved, Active (plus a separate "Rejected" stage for
+    // anyone who doesn't make it through). driver-onboarding.js drops a
+    // new Opportunity into whichever stage name matches
+    // onboardingFirstStageName the moment a new driver is saved.
+    onboardingPipelineName: "Driver Onboarding",
+    onboardingFirstStageName: "Applied",
     baseTowRate: 85,
     mileageRate: 3,
     setupUrl: "",
@@ -801,6 +812,83 @@
           return ensureOpportunityField({ name: "Assigned Driver", dataType: "TEXT" });
         });
       });
+  }
+
+  // ---------------------------------------------------------------------
+  // 10. Driver Onboarding Setup (2026-11-23) -- adds the rest of the
+  // fields driver-onboarding.js's fill-out form reads/writes on the
+  // existing Drivers object (custom_objects.driver_profiles). Does NOT
+  // touch the one field already on that object (the driver's own name) --
+  // ensureObjectField() only matches on exact field NAME, and this file
+  // has no reliable way to know whether that field is named "Driver Name",
+  // "Driver's Name", or something else without reading it live, so
+  // creating a field here under a guessed name risks a confusing
+  // duplicate sitting next to the real one instead of matching it.
+  // driver-onboarding.js itself resolves that field (and every field
+  // below) BY NAME at load time -- same by-name idiom resolveFieldIds()
+  // already uses for Opportunity custom fields elsewhere in this file --
+  // so it works whatever that first field actually ends up named.
+  //
+  // Each SINGLE_OPTIONS field's picklistOptions below are the exact
+  // option KEYS driver-onboarding.js writes and dashboard.js's
+  // DRIVER_OPTION_LABELS already expects (GHL stores/returns the key, not
+  // the label -- see dashboard.js's own CONFIRMED note on this). "Hourly
+  // Rate" is new here -- the existing Pay Type field only ever had
+  // Commission wired up on the Pay Statements side (see "9. Driver Pay
+  // Statements" above, which computes job value x Commission % and has
+  // no equivalent math for an hourly driver yet); this just gives an
+  // hourly driver somewhere to have their rate stored for when that gets
+  // built.
+  //
+  // UNVERIFIED, same caveat as every other ensureObjectField call in this
+  // file: never run against a real token in this session. Idempotent --
+  // safe to click more than once.
+  // ---------------------------------------------------------------------
+  function ensureDriverOnboardingSetup(onStep) {
+    function step(label, fn) {
+      if (onStep) onStep(label);
+      return fn();
+    }
+    return step("Driver profile fields", function () {
+      return Promise.all([
+        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Email", dataType: "TEXT" }),
+        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Phone", dataType: "TEXT" }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Onboarding Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["onboarding", "active", "suspended"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Employment Type", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["full_time", "part_time", "weekend"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Pay Type", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["commission", "hourly"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Commission Pct", dataType: "NUMERICAL" }),
+        ensureObjectField(CONFIG.objectKeys.drivers, { name: "Hourly Rate", dataType: "MONETORY" }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "License Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["on_file", "missing", "expired"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Insurance Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["on_file", "missing", "expired"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "MVR Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["on_file", "missing", "expired"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Certification Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["on_file", "missing", "expired"],
+        }),
+        ensureObjectField(CONFIG.objectKeys.drivers, {
+          name: "Training Status", dataType: "SINGLE_OPTIONS",
+          picklistOptions: ["not_started", "in_progress", "complete"],
+        }),
+      ]);
+    });
   }
 
   // Driver roster for the picker below, plus each driver's Commission %
@@ -1828,6 +1916,12 @@
     '</div>' +
     '</div>' +
 
+    '<div class="card" id="cardDriverOnboarding"><h2>10. Driver Onboarding Setup</h2>' +
+    '<div class="cardDesc">Adds the rest of the fields the Driver Onboarding form needs to the existing Drivers object (Email, Phone, Onboarding Status, Employment Type, Pay Type, Commission %, Hourly Rate, and the License/Insurance/MVR/Certification/Training status fields). <b>One thing this can\'t do:</b> create the "Driver Onboarding" Pipeline itself — go create that by hand first, in Settings &rarr; Pipelines, with these exact stages in order: <b>Applied, Documents Submitted, Background Check, Approved, Active</b> (plus a separate <b>Rejected</b> stage) — then paste driver-onboarding.js\'s own snippet on its page per that file\'s own top-of-file comment.</div>' +
+    '<div class="btnRow"><button type="button" class="btn primary" id="btnSetupDriverOnboarding">Set up driver fields</button></div>' +
+    '<div class="statusMsg" id="driverSetupStatus"></div>' +
+    '</div>' +
+
     '<div class="foot-note" id="footNote">Field IDs for AAA reconciliation on the Opportunity are specific to this GHL location — see the note at the top of setup.js before reusing this for a different client.</div>' +
     "</div>";
 
@@ -1967,7 +2061,8 @@
      "acctsTableWrap", "fAcctName", "fAcctType", "fAcctRateTable", "btnSaveAcct", "btnCancelAcctEdit", "acctStatus",
      "btnSetupPayStatements", "paySetupStatus",
      "fPayDriver", "btnPayLoadDrivers", "fPayStart", "fPayEnd", "btnPayPreview",
-     "payProgress", "payProgressBar", "payProgressLabel", "payStatus", "paySummary", "payTableWrap", "payAdjustWrap", "payApplyWrap"
+     "payProgress", "payProgressBar", "payProgressLabel", "payStatus", "paySummary", "payTableWrap", "payAdjustWrap", "payApplyWrap",
+     "btnSetupDriverOnboarding", "driverSetupStatus"
     ].forEach(function (id) { els[id] = root.querySelector("#" + id); });
 
     // ---- Prefill from CONFIG (whatever was pasted in window.CJT_CONFIG) ----
@@ -2859,6 +2954,22 @@
           showStatus(els.payStatus, "err", err.message);
         })
         .finally(function () { els.btnPayPreview.disabled = false; });
+    });
+
+    // ---- 10. Driver Onboarding Setup -------------------------------------
+    els.btnSetupDriverOnboarding.addEventListener("click", function () {
+      if (!requireConn()) return;
+      Object.assign(CONFIG, liveConfigFromForm());
+      els.btnSetupDriverOnboarding.disabled = true;
+      showStatus(els.driverSetupStatus, "info", "Starting…");
+      ensureDriverOnboardingSetup(function (label) { showStatus(els.driverSetupStatus, "info", label + "…"); })
+        .then(function () {
+          showStatus(els.driverSetupStatus, "ok", "Driver profile fields are set up. Don't forget the \"Driver Onboarding\" Pipeline itself still needs to be created by hand (see this card's note above) before new drivers will land anywhere.");
+        })
+        .catch(function (err) {
+          showStatus(els.driverSetupStatus, "err", "Setup failed: " + err.message + " — safe to click “Set up driver fields” again, it skips anything already created.");
+        })
+        .finally(function () { els.btnSetupDriverOnboarding.disabled = false; });
     });
 
     // Auto-load if a connection is already configured (e.g. this page was
