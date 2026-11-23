@@ -1,21 +1,36 @@
 /*!
- * CJT AAA Reconciled Items -> Mark Paid tool.
+ * CJT AAA Payment Status tool: Needs Reconciling (backfill) + Reconciled -> Paid.
  * Hosted on GitHub next to dashboard.js/setup.js/aaa-diff-widget.js, loaded
  * the same way (jsDelivr). Same pasted CJT_CONFIG block as those files.
  *
- * What this is for: setup.js's statement-import "Apply" step auto-flips an
- * Opportunity's "Payment Status" custom field from Unpaid -> Reconciled the
- * moment it writes AAA Pay Date (see setup.js's writeOpportunityFields()
- * comment, added 2026-11-23). "Reconciled" means the statement import
- * matched and wrote the payment fields -- it does NOT mean AAA's actual
- * bank deposit has been checked yet. This tool is the next, deliberate step:
- * pick a Pay Date range, see every Opportunity sitting at "Reconciled" in
- * that range, and -- only after confirming AAA's real payment matches --
- * select some or all of them and bulk-write Payment Status -> "Paid".
+ * Background (2026-11-23): setup.js's statement-import "Apply" step now
+ * auto-flips an Opportunity's "Payment Status" custom field from Unpaid ->
+ * Reconciled the moment it writes AAA Pay Date. That only applies to
+ * imports run AFTER that change shipped -- it does nothing for jobs that
+ * already had a Pay Date sitting on them before then. This tool covers
+ * both sides of that:
  *
- * Nothing here ever writes "Reconciled" -- only setup.js's import does
- * that. This tool's only write is Reconciled -> Paid, and only for rows you
- * explicitly check and confirm.
+ *   Tab 1 "Needs Reconciling" -- a one-time (or occasional) backfill: every
+ *   Opportunity that already has an AAA Pay Date but is still Unpaid (or has
+ *   no Payment Status value at all), so you can sweep those into Reconciled
+ *   without waiting for a future import to touch them again.
+ *
+ *   Tab 2 "Reconciled -> Mark Paid" -- the ongoing day-to-day tool: every
+ *   Opportunity sitting at Reconciled in a Pay Date range, so you can bulk-
+ *   confirm them to Paid once you've checked AAA's actual deposit matches.
+ *
+ * "Reconciled" means the statement import matched and wrote the payment
+ * fields -- it does NOT mean AAA's actual bank deposit has been checked.
+ * Neither tab here ever writes anything but Reconciled or Paid, and only
+ * for rows you explicitly check and confirm.
+ *
+ * IMPORTANT, one-time setup needed before either tab works: the "Payment
+ * Status" custom field in GHL must actually have "Reconciled" as one of its
+ * dropdown options. If you only see Unpaid/Paid when you open that field on
+ * an Opportunity, go to Settings -> Custom Fields -> Opportunity -> Payment
+ * Status -> Edit, and add "Reconciled" as a third option (between Unpaid
+ * and Paid), then Save. Until that option exists, writes of "Reconciled"
+ * from here (or from setup.js's import) have nowhere valid to land.
  *
  * ============================================================================
  * WHAT TO PASTE INTO GHL (Website/Funnel builder -> Custom HTML/CSS/JS
@@ -271,11 +286,52 @@
     };
   }
 
-  // Only rows sitting at "Reconciled" are this tool's business -- Unpaid
-  // rows have nothing to act on yet, and Paid rows are already done.
+  // Tab 1 candidates: has an AAA Pay Date on file already, but Payment
+  // Status is still Unpaid or has no value at all (an unset single-select
+  // reads as blank/null, not literally "Unpaid", so treat both the same).
+  function needsReconcileRows(rows) {
+    return rows.filter(function (r) {
+      if (!r.payDateIso) return false;
+      var s = String(r.paymentStatus || "").trim().toLowerCase();
+      return s === "" || s === "unpaid";
+    });
+  }
+  // Tab 2 candidates: already sitting at Reconciled, waiting on a human
+  // check against AAA's actual deposit before moving to Paid.
   function reconciledRows(rows) {
     return rows.filter(function (r) { return String(r.paymentStatus || "").trim().toLowerCase() === "reconciled"; });
   }
+
+  var MODES = {
+    needsReconcile: {
+      key: "needsReconcile",
+      tabLabel: "Needs Reconciling",
+      heading: "AAA Jobs Needing Reconciliation",
+      filterRows: needsReconcileRows,
+      writeValue: "Reconciled",
+      actionLabel: "Mark selected Reconciled",
+      confirmText: function (n) {
+        return "Mark " + n + " job(s) as Reconciled?\n\n" +
+          "This means the AAA Pay Date is on file and the statement import matched these jobs -- it does not confirm AAA's payment amount is correct. Use the \"Reconciled → Mark Paid\" tab for that step.";
+      },
+      successText: function (n) { return "Marked " + n + " job(s) Reconciled."; },
+      emptyText: "No Unpaid jobs with an AAA Pay Date in this range -- nothing waiting to be reconciled.",
+    },
+    reconciled: {
+      key: "reconciled",
+      tabLabel: "Reconciled → Mark Paid",
+      heading: "AAA Reconciled Items — Mark Paid",
+      filterRows: reconciledRows,
+      writeValue: "Paid",
+      actionLabel: "Mark selected Paid",
+      confirmText: function (n) {
+        return "Mark " + n + " reconciled job(s) as Paid?\n\n" +
+          "Only do this after checking AAA's actual deposit matches these jobs' statement amounts -- this cannot be undone from here.";
+      },
+      successText: function (n) { return "Marked " + n + " job(s) Paid."; },
+      emptyText: "No Reconciled AAA jobs in this range -- nothing waiting on a bulk Paid update right now.",
+    },
+  };
 
   // from/to are "YYYY-MM-DD" strings or "" (no bound on that side). A row
   // with no parseable Pay Date never matches a real range (nothing to
@@ -299,10 +355,11 @@
   }
 
   // ---------------------------------------------------------------------
-  // Bulk write -- Reconciled -> Paid, sequential with progress (same
-  // rate-limit-respecting queue shape as setup.js's applyReconciliation()).
+  // Bulk write -- sequential with progress (same rate-limit-respecting
+  // queue shape as setup.js's applyReconciliation()). Shared by both tabs;
+  // only the written value differs.
   // ---------------------------------------------------------------------
-  function markPaid(recordIds, onProgress) {
+  function writePaymentStatus(recordIds, value, onProgress) {
     var results = [];
     var i = 0;
     function next() {
@@ -312,7 +369,7 @@
       return ghlApi("/opportunities/" + id, {
         method: "PUT",
         version: CONFIG.apiVersions.opportunities,
-        body: { customFields: [{ id: fieldId("paymentStatus"), fieldValue: "Paid" }] },
+        body: { customFields: [{ id: fieldId("paymentStatus"), fieldValue: value }] },
       }).then(function (r) {
         results.push({ id: id, ok: true });
         if (onProgress) onProgress(results.length, recordIds.length);
@@ -328,9 +385,9 @@
 
   window.__CJT_AAA_PAID_INTERNAL__ = {
     CONFIG: CONFIG, parseMoney: parseMoney, parsePayDateISO: parsePayDateISO,
-    mapOpportunity: mapOpportunity, reconciledRows: reconciledRows,
+    mapOpportunity: mapOpportunity, needsReconcileRows: needsReconcileRows, reconciledRows: reconciledRows,
     filterByDateRange: filterByDateRange, sortRowsForDisplay: sortRowsForDisplay,
-    loadAaaOpportunities: loadAaaOpportunities, markPaid: markPaid,
+    loadAaaOpportunities: loadAaaOpportunities, writePaymentStatus: writePaymentStatus,
   };
 
   // ---------------------------------------------------------------------
@@ -341,9 +398,13 @@
     '#cjt-aaa-paid-root *{box-sizing:border-box}',
     '#cjt-aaa-paid-root{background:var(--apt-bg);color:var(--apt-text);font-family:"Roboto",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:20px 16px;border-radius:14px}',
     '#cjt-aaa-paid-root .mono{font-family:"Roboto",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}',
-    '#cjt-aaa-paid-root .aptTop{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}',
+    '#cjt-aaa-paid-root .aptTop{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}',
     '#cjt-aaa-paid-root h2{font-size:16px;margin:0;font-weight:700}',
     '#cjt-aaa-paid-root .aptAsOf{font-size:11.5px;color:var(--apt-text-dim)}',
+    '#cjt-aaa-paid-root .aptTabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}',
+    '#cjt-aaa-paid-root .aptTabs button{appearance:none;border:1px solid var(--apt-border);background:var(--apt-panel);color:var(--apt-text-dim);font-family:inherit;font-size:13px;font-weight:600;padding:7px 14px;border-radius:999px;cursor:pointer}',
+    '#cjt-aaa-paid-root .aptTabs button.active{background:var(--apt-accent);border-color:var(--apt-accent);color:#fff}',
+    '#cjt-aaa-paid-root .aptTabs button:hover:not(.active){border-color:var(--apt-accent);color:var(--apt-accent)}',
     '#cjt-aaa-paid-root .aptFilters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}',
     '#cjt-aaa-paid-root label.aptLbl{font-size:11.5px;color:var(--apt-text-dim);display:flex;flex-direction:column;gap:3px}',
     '#cjt-aaa-paid-root input[type=date]{border:1px solid var(--apt-border);border-radius:8px;padding:6px 9px;font-size:13px;font-family:inherit;background:var(--apt-panel);color:var(--apt-text)}',
@@ -358,14 +419,15 @@
     '#cjt-aaa-paid-root .aptBar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;background:var(--apt-panel);border:1px solid var(--apt-border);border-radius:10px;padding:10px 14px;margin-bottom:12px}',
     '#cjt-aaa-paid-root .aptBar .aptCount{font-size:13px;font-weight:600}',
     '#cjt-aaa-paid-root .tableWrap{background:var(--apt-panel);border:1px solid var(--apt-border);border-radius:10px;overflow-x:auto}',
-    '#cjt-aaa-paid-root table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:680px}',
+    '#cjt-aaa-paid-root table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:740px}',
     '#cjt-aaa-paid-root thead th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--apt-text-dim);font-weight:600;padding:9px 12px;border-bottom:1px solid var(--apt-border);white-space:nowrap}',
     '#cjt-aaa-paid-root tbody td{padding:8px 12px;border-bottom:1px solid var(--apt-border);white-space:nowrap}',
     '#cjt-aaa-paid-root tbody tr:last-child td{border-bottom:none}',
     '#cjt-aaa-paid-root tbody tr.aptChecked{background:var(--apt-good-soft)}',
     '#cjt-aaa-paid-root .diffPos{color:var(--apt-crit);font-weight:600}',
     '#cjt-aaa-paid-root .diffNeg{color:var(--apt-good);font-weight:600}',
-    '#cjt-aaa-paid-root .aptEmpty{padding:18px;text-align:center;color:var(--apt-text-dim);font-size:13px}'
+    '#cjt-aaa-paid-root .aptEmpty{padding:18px;text-align:center;color:var(--apt-text-dim);font-size:13px}',
+    '#cjt-aaa-paid-root .statusPill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:#eef1f5;color:var(--apt-text-dim)}'
   ].join("\n");
 
   function esc(s) {
@@ -383,7 +445,7 @@
   function mount() {
     var root = document.getElementById("cjt-aaa-paid-root");
     if (!root) {
-      console.error("[CJT AAA Reconciled->Paid tool] #cjt-aaa-paid-root not found on the page.");
+      console.error("[CJT AAA Payment Status tool] #cjt-aaa-paid-root not found on the page.");
       return;
     }
     var styleEl = document.createElement("style");
@@ -391,7 +453,11 @@
     document.head.appendChild(styleEl);
 
     root.innerHTML =
-      '<div class="aptTop"><h2>AAA Reconciled Items — Mark Paid</h2><span class="aptAsOf" id="aptAsOf"></span></div>' +
+      '<div class="aptTop"><h2 id="aptHeading"></h2><span class="aptAsOf" id="aptAsOf"></span></div>' +
+      '<div class="aptTabs" id="aptTabs">' +
+      '<button type="button" data-mode="needsReconcile">' + esc(MODES.needsReconcile.tabLabel) + '</button>' +
+      '<button type="button" data-mode="reconciled">' + esc(MODES.reconciled.tabLabel) + '</button>' +
+      '</div>' +
       '<div class="aptFilters">' +
       '<label class="aptLbl">Pay date from<input type="date" id="aptFrom"></label>' +
       '<label class="aptLbl">Pay date to<input type="date" id="aptTo"></label>' +
@@ -401,19 +467,19 @@
       '<div id="aptBody" hidden>' +
       '<div class="aptBar">' +
       '<span class="aptCount" id="aptCount">0 selected</span>' +
-      '<button type="button" class="btn primary" id="aptMarkPaid" disabled>Mark selected Paid</button>' +
+      '<button type="button" class="btn primary" id="aptAction" disabled></button>' +
       '</div>' +
       '<div id="aptTableWrap"></div>' +
       '</div>';
 
     var els = {};
-    ["aptFrom", "aptTo", "aptRefresh", "aptStatus", "aptBody", "aptAsOf", "aptCount", "aptMarkPaid", "aptTableWrap"]
+    ["aptFrom", "aptTo", "aptRefresh", "aptStatus", "aptBody", "aptAsOf", "aptCount", "aptAction", "aptTableWrap", "aptHeading", "aptTabs"]
       .forEach(function (id) { els[id] = root.querySelector("#" + id); });
 
     var internal = window.__CJT_AAA_PAID_INTERNAL__;
     var allRows = [];
-    var lastFiltered = [];
     var checked = {}; // recordId -> true
+    var currentMode = MODES.needsReconcile;
 
     function selectedIds() {
       return Object.keys(checked).filter(function (id) { return checked[id]; });
@@ -422,27 +488,34 @@
     function renderBar() {
       var n = selectedIds().length;
       els.aptCount.textContent = n + " selected";
-      els.aptMarkPaid.disabled = n === 0;
+      els.aptAction.disabled = n === 0;
     }
 
     function render() {
-      var filtered = internal.filterByDateRange(internal.reconciledRows(allRows), els.aptFrom.value, els.aptTo.value);
-      lastFiltered = filtered;
+      els.aptHeading.textContent = currentMode.heading;
+      els.aptAction.textContent = currentMode.actionLabel;
+      Array.prototype.forEach.call(els.aptTabs.querySelectorAll("button"), function (btn) {
+        btn.classList.toggle("active", btn.dataset.mode === currentMode.key);
+      });
+
+      var filtered = internal.filterByDateRange(currentMode.filterRows(allRows), els.aptFrom.value, els.aptTo.value);
       checked = {};
       renderBar();
 
       if (filtered.length === 0) {
-        els.aptTableWrap.innerHTML = '<div class="aptEmpty">No Reconciled AAA jobs in this range — nothing waiting on a bulk Paid update right now.</div>';
+        els.aptTableWrap.innerHTML = '<div class="aptEmpty">' + esc(currentMode.emptyText) + '</div>';
         return;
       }
       var sorted = internal.sortRowsForDisplay(filtered);
       var body = sorted.map(function (r) {
         var diffClass = r.diff > 0 ? "diffPos" : r.diff < 0 ? "diffNeg" : "";
+        var statusLabel = r.paymentStatus ? r.paymentStatus : "(blank)";
         return '<tr data-id="' + esc(r.recordId) + '">' +
           '<td><input type="checkbox" class="aptRowCheck" data-id="' + esc(r.recordId) + '"></td>' +
           "<td>" + esc(r.wo || "—") + "</td>" +
           "<td>" + esc(r.paymentId || "—") + "</td>" +
           "<td>" + esc(r.payDate || "—") + "</td>" +
+          '<td><span class="statusPill">' + esc(statusLabel) + "</span></td>" +
           "<td>" + money(r.expected) + "</td>" +
           "<td>" + money(r.gross) + "</td>" +
           '<td class="' + diffClass + '">' + money(r.diff) + "</td>" +
@@ -451,7 +524,7 @@
       els.aptTableWrap.innerHTML =
         '<div class="tableWrap"><table><thead><tr>' +
         '<th><input type="checkbox" id="aptSelectAll"></th>' +
-        "<th>Work Order</th><th>Payment ID</th><th>Pay Date</th><th>Expected</th><th>Actual Paid</th><th>Difference</th>" +
+        "<th>Work Order</th><th>Payment ID</th><th>Pay Date</th><th>Status</th><th>Expected</th><th>Actual Paid</th><th>Difference</th>" +
         "</tr></thead><tbody>" + body + "</tbody></table></div>";
 
       var selectAll = els.aptTableWrap.querySelector("#aptSelectAll");
@@ -474,9 +547,9 @@
 
     function loadData() {
       els.aptRefresh.disabled = true;
-      els.aptMarkPaid.disabled = true;
+      els.aptAction.disabled = true;
       els.aptStatus.className = "aptStatus";
-      els.aptStatus.textContent = "Loading reconciled AAA jobs…";
+      els.aptStatus.textContent = "Loading AAA jobs…";
       els.aptBody.hidden = true;
       if (!CONFIG.locationId || !CONFIG.privateToken) {
         els.aptStatus.className = "aptStatus err";
@@ -499,29 +572,42 @@
         .finally(function () { els.aptRefresh.disabled = false; });
     }
 
+    // Re-pulls fresh data after a bulk-write run without resetting the
+    // status line back to "Loading…".
+    function loadDataQuiet() {
+      return internal.loadAaaOpportunities().then(function (opps) {
+        allRows = opps.map(internal.mapOpportunity);
+        render();
+        els.aptAsOf.textContent = "As of " + new Date().toLocaleTimeString();
+      }).finally(function () { els.aptRefresh.disabled = false; });
+    }
+
     els.aptRefresh.addEventListener("click", loadData);
     els.aptFrom.addEventListener("change", render);
     els.aptTo.addEventListener("change", render);
+    els.aptTabs.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      currentMode = MODES[btn.dataset.mode];
+      render();
+    });
 
-    els.aptMarkPaid.addEventListener("click", function () {
+    els.aptAction.addEventListener("click", function () {
       var ids = selectedIds();
       if (ids.length === 0) return;
-      var ok = window.confirm(
-        "Mark " + ids.length + " reconciled job(s) as Paid?\n\n" +
-        "Only do this after checking AAA's actual deposit matches these jobs' statement amounts — this cannot be undone from here."
-      );
+      var ok = window.confirm(currentMode.confirmText(ids.length));
       if (!ok) return;
-      els.aptMarkPaid.disabled = true;
+      els.aptAction.disabled = true;
       els.aptRefresh.disabled = true;
       els.aptStatus.className = "aptStatus";
-      els.aptStatus.textContent = "Marking 0 / " + ids.length + " Paid…";
-      internal.markPaid(ids, function (done, total) {
-        els.aptStatus.textContent = "Marking " + done + " / " + total + " Paid…";
+      els.aptStatus.textContent = "Writing 0 / " + ids.length + "…";
+      internal.writePaymentStatus(ids, currentMode.writeValue, function (done, total) {
+        els.aptStatus.textContent = "Writing " + done + " / " + total + "…";
       }).then(function (results) {
         var failed = results.filter(function (r) { return !r.ok; });
         if (failed.length === 0) {
           els.aptStatus.className = "aptStatus ok";
-          els.aptStatus.textContent = "Marked " + results.length + " job(s) Paid.";
+          els.aptStatus.textContent = currentMode.successText(results.length);
         } else {
           els.aptStatus.className = "aptStatus err";
           els.aptStatus.textContent = failed.length + " of " + results.length + " failed: " + failed[0].error +
@@ -530,16 +616,6 @@
         return loadDataQuiet();
       });
     });
-
-    // Re-pulls fresh data after a Mark Paid run without stomping the status
-    // line loadData() would otherwise reset to "Loading…".
-    function loadDataQuiet() {
-      return internal.loadAaaOpportunities().then(function (opps) {
-        allRows = opps.map(internal.mapOpportunity);
-        render();
-        els.aptAsOf.textContent = "As of " + new Date().toLocaleTimeString();
-      }).finally(function () { els.aptRefresh.disabled = false; });
-    }
 
     loadData();
   }
